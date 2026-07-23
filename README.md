@@ -51,11 +51,16 @@ mindplace_build
 Scans all supported files in the current directory and creates `graph-out/` with:
 
 | File | Description |
-|------|-------------|
+| ------ | ------------- |
 | `graph.json` | The full knowledge graph, queryable across sessions |
 | `GRAPH_REPORT.md` | Audit report with god nodes, communities, suggested questions |
-| `graph.html` | Interactive D3.js visualization (open in browser) |
+| `graph.html` | Interactive local vis-network visualization (open in browser) |
+| `vis-network.min.js` | Bundled visualisation runtime used by `graph.html` (no CDN request) |
 | `cache/` | SHA256 cache for incremental rebuilds |
+
+When the output directory is not already ignored, the interactive tool asks whether it should
+add `graph-out/` to the selected project's `.gitignore`. In non-interactive sessions, it leaves
+`.gitignore` unchanged.
 
 Options:
 
@@ -106,7 +111,7 @@ pi-mindplace/
 |   +-- graph.ts              KnowledgeGraph class (PageRank, Louvain, directed mode)
 |   +-- query.ts              TF-IDF scorer + BFS/DFS traversal with token budget
 |   +-- report.ts             GRAPH_REPORT.md generator
-|   +-- viz.ts                D3.js standalone graph.html generator
+|   +-- viz.ts                Local standalone graph.html generator
 |   +-- tools/
 |       +-- mindplace-build.ts
 |       +-- mindplace-query.ts
@@ -133,7 +138,7 @@ pi-mindplace was inspired by [graphify](https://github.com/codelion/graphify) â€
 - Louvain without networkx: greedy modularity optimization in ~50 lines
 - Token-budget-aware: BFS traversal that stops when the budget is exhausted
 - Incremental builds: SHA256 content hashing, unchanged files skip re-extraction
-- Standalone visualization: D3.js graph.html with search, community coloring, and drag interaction
+- Local standalone visualization: `graph.html` copies its pinned vis-network runtime beside the report; opening it makes no CDN request
 
 ## License
 

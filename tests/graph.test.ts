@@ -78,7 +78,7 @@ describe("KnowledgeGraph", () => {
 
     const top = kg.topNodes(3);
     assert.ok(top.length > 0, "should find god nodes");
-    assert.ok(top[0].degree >= top[1]?.degree ?? 0, "should be sorted by degree");
+    assert.ok(top[0].degree >= (top[1]?.degree ?? 0), "should be sorted by degree");
   });
 
   it("serializes to and from JSON", () => {
@@ -94,21 +94,4 @@ describe("KnowledgeGraph", () => {
     assert.equal(kg2.edges.length, kg1.edges.length);
   });
 
-  it("merges incremental extractions", () => {
-    const kg = KnowledgeGraph.fromExtraction(sampleExtraction());
-
-    const extra: ExtractionResult = {
-      nodes: [
-        { id: "c_helper", label: "helper", type: "function", sourceFile: "c.ts", sourceLocation: "L1" },
-        { id: "mod_c", label: "moduleC", type: "file", sourceFile: "c.ts" },
-      ],
-      edges: [
-        { source: "mod_c", target: "c_helper", relation: "contains", confidence: "EXTRACTED" as const },
-      ],
-    };
-
-    kg.merge(extra);
-    assert.equal(kg.nodes.size, 7);
-    assert.equal(kg.edges.length, 6);
-  });
 });

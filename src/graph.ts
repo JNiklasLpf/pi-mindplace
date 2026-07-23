@@ -49,23 +49,6 @@ export class KnowledgeGraph {
     return kg;
   }
 
-  /** Add nodes/edges from another extraction (for incremental updates) */
-  merge(result: ExtractionResult): void {
-    for (const node of result.nodes) {
-      if (!this.nodes.has(node.id)) {
-        this.nodes.set(node.id, { ...node });
-        this.adjacency.set(node.id, new Set());
-      }
-    }
-    for (const edge of result.edges) {
-      if (this.nodes.has(edge.source) && this.nodes.has(edge.target)) {
-        this.edges.push({ ...edge });
-        this.adjacency.get(edge.source)?.add(edge.target);
-        this.adjacency.get(edge.target)?.add(edge.source);
-      }
-    }
-  }
-
   /** Compute PageRank centrality scores (power iteration, no numpy needed) */
   computeCentrality(alpha: number = 0.85, epsilon: number = 1e-6, maxIter: number = 100): void {
     const N = this.nodes.size;

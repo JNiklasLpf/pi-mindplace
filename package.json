@@ -33,10 +33,12 @@
     "url": "https://github.com/Smotherer007/pi-mindplace/issues"
   },
   "scripts": {
-    "test": "node --experimental-test-module-mocks --experimental-test-coverage --test 'tests/**/*.test.ts'",
+    "test": "node --experimental-test-module-mocks --experimental-test-coverage --test tests/detect.test.ts tests/extract.test.ts tests/gitignore.test.ts tests/graph.test.ts tests/kotlin.test.ts tests/query.test.ts tests/viz.test.ts",
     "test:watch": "node --experimental-test-module-mocks --test --watch 'tests/**/*.test.ts'"
   },
   "dependencies": {
+    "@sengac/tree-sitter-kotlin": "0.4.6",
+    "npm-check-updates": "file:vendor/npm-check-updates",
     "tree-sitter": "^0.21.1",
     "tree-sitter-bash": "^0.21.0",
     "tree-sitter-cpp": "^0.23.4",
@@ -44,7 +46,6 @@
     "tree-sitter-java": "^0.23.5",
     "tree-sitter-javascript": "^0.21.2",
     "tree-sitter-json": "^0.21.0",
-    "tree-sitter-kotlin": "^0.3.8",
     "tree-sitter-python": "^0.21.0",
     "tree-sitter-ruby": "^0.23.1",
     "tree-sitter-rust": "^0.21.0",
@@ -54,11 +55,17 @@
   "peerDependencies": {
     "typebox": "*"
   },
+  "overrides": {
+    "@sengac/tree-sitter-kotlin": {
+      "npm-check-updates": "$npm-check-updates"
+    }
+  },
   "publishConfig": {
     "access": "public"
   },
   "devDependencies": {
     "@semantic-release/git": "^10.0.0",
+    "@types/node": "^26.1.1",
     "semantic-release": "^25.0.0"
   },
   "pi": {
