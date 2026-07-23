@@ -37,7 +37,7 @@ export const MindplaceBuildTool = {
 	name: "mindplace_build",
 	label: "Build Mind Place",
 	description:
-		"Scan the current project and build a knowledge graph of all code entities (functions, classes, imports). Supports JS, TS, Python, Go, Bash, JSON. The graph is persisted to graph-out/ for fast queries across sessions.",
+		"Scan the current project and build a knowledge graph of all code entities (functions, classes, imports). Supports JavaScript, TypeScript, Python, Go, C#, Bash, JSON, and more. The graph is persisted to graph-out/ for fast queries across sessions.",
 	promptSnippet: "Build a code knowledge graph for token-efficient queries",
 	parameters: Type.Object({
 		path: Type.Optional(

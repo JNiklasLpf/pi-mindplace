@@ -24,7 +24,7 @@ This mirrors graphify's PreToolUse hook but adapted to pi's extension model via 
 
 ## Supported languages
 
-JavaScript, TypeScript, Python, Go, Java, Rust, C++, Ruby, Kotlin, Scala, Bash, JSON
+JavaScript, TypeScript, Python, Go, C#, Java, Rust, C++, Ruby, Kotlin, Scala, Bash, JSON
 
 ## Install
 

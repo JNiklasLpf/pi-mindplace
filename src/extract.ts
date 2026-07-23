@@ -24,6 +24,7 @@ import TsxLang from "tree-sitter-typescript/bindings/node/tsx.js";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Bash from "tree-sitter-bash";
+import CSharp from "tree-sitter-c-sharp";
 import Json from "tree-sitter-json";
 import Java from "tree-sitter-java";
 import Rust from "tree-sitter-rust";
@@ -51,6 +52,7 @@ const GRAMMARS: Record<string, { grammar: Grammar; exts: Set<string> }> = {
 	python: { grammar: Python as Grammar, exts: new Set([".py", ".pyi"]) },
 	go: { grammar: Go as Grammar, exts: new Set([".go"]) },
 	bash: { grammar: Bash as Grammar, exts: new Set([".sh", ".bash", ".zsh"]) },
+	csharp: { grammar: CSharp as Grammar, exts: new Set([".cs"]) },
 	json: { grammar: Json as Grammar, exts: new Set([".json"]) },
 	java: { grammar: Java as Grammar, exts: new Set([".java"]) },
 	rust: { grammar: Rust as Grammar, exts: new Set([".rs"]) },
@@ -692,6 +694,215 @@ function extractJson(
 	return { nodes, edges };
 }
 
+// ── C# extraction ───────────────────────────────────────────────────────────
+
+function extractCSharp(filePath: string, tree: Parser.Tree): ExtractionResult {
+	const nodes: GraphNode[] = [];
+	const edges: GraphEdge[] = [];
+	const seenNodeIds = new Set<string>();
+	const seenEdgeIds = new Set<string>();
+	const fileNodeId = nodeId(filePath, "file");
+	nodes.push({
+		id: fileNodeId,
+		label: filePath,
+		type: "file",
+		sourceFile: filePath,
+	});
+	seenNodeIds.add(fileNodeId);
+
+	function addEdge(
+		source: string,
+		target: string,
+		relation: GraphEdge["relation"],
+		confidence: GraphEdge["confidence"],
+	): void {
+		const edgeId = `${source}:${relation}:${target}`;
+		if (seenEdgeIds.has(edgeId)) return;
+		seenEdgeIds.add(edgeId);
+		edges.push({ source, target, relation, confidence });
+	}
+
+	function addNode(
+		name: string,
+		type: string,
+		node: Parser.SyntaxNode,
+		parentId: string,
+	): string {
+		const id = nodeId(filePath, name);
+		if (!seenNodeIds.has(id)) {
+			seenNodeIds.add(id);
+			nodes.push({
+				id,
+				label: name,
+				type,
+				sourceFile: filePath,
+				sourceLocation: `L${node.startPosition.row + 1}`,
+			});
+		}
+		addEdge(parentId, id, "contains", "EXTRACTED");
+		return id;
+	}
+
+	function declarationName(node: Parser.SyntaxNode): string {
+		return (
+			node.childForFieldName?.("name")?.text ??
+			node.descendantsOfType("identifier")[0]?.text ??
+			"anonymous"
+		);
+	}
+
+	function addBaseTypes(node: Parser.SyntaxNode, ownerId: string): void {
+		const baseList =
+			node.childForFieldName?.("base_list") ??
+			node.children.find((child) => child.type === "base_list");
+		if (!baseList) return;
+		for (const typeNode of baseList.namedChildren) {
+			if (
+				typeNode.type === "identifier" ||
+				typeNode.type === "qualified_name" ||
+				typeNode.type === "generic_name"
+			) {
+				addEdge(
+					ownerId,
+					nodeId(filePath, typeNode.text),
+					"inherits",
+					"EXTRACTED",
+				);
+			}
+		}
+	}
+
+	function addCalls(node: Parser.SyntaxNode, ownerId: string): void {
+		for (const invocation of node.descendantsOfType("invocation_expression")) {
+			const target = invocation.childForFieldName?.("function")?.text;
+			if (target)
+				addEdge(ownerId, nodeId(filePath, target), "calls", "INFERRED");
+		}
+	}
+
+	function walk(
+		node: Parser.SyntaxNode,
+		parentId: string,
+		scope: string,
+	): void {
+		if (node.type === "compilation_unit") {
+			let activeParentId = parentId;
+			let activeScope = scope;
+			for (const child of node.namedChildren) {
+				if (child.type === "file_scoped_namespace_declaration") {
+					const namespaceName =
+						child.childForFieldName?.("name")?.text ?? declarationName(child);
+					activeParentId = addNode(namespaceName, "namespace", child, parentId);
+					activeScope = namespaceName;
+					continue;
+				}
+				walk(child, activeParentId, activeScope);
+			}
+			return;
+		}
+
+		const type = node.type;
+		const named = declarationName(node);
+		const qualifiedName = scope ? `${scope}.${named}` : named;
+
+		if (type === "namespace_declaration") {
+			const namespaceName = node.childForFieldName?.("name")?.text ?? named;
+			const namespaceId = addNode(namespaceName, "namespace", node, parentId);
+			for (const child of node.namedChildren)
+				walk(child, namespaceId, namespaceName);
+			return;
+		}
+
+		if (type === "using_directive") {
+			const importedName =
+				node.childForFieldName?.("name")?.text ?? node.namedChildren[0]?.text;
+			if (importedName)
+				addEdge(
+					fileNodeId,
+					nodeId(filePath, importedName),
+					"imports",
+					"EXTRACTED",
+				);
+			return;
+		}
+
+		if (type === "attribute") {
+			const attributeName = node.childForFieldName?.("name")?.text ?? named;
+			addNode(
+				`${scope}.${attributeName}@L${node.startPosition.row + 1}`,
+				"attribute",
+				node,
+				parentId,
+			);
+			return;
+		}
+
+		if (type === "global_statement") {
+			const statementId = addNode(
+				`top-level@L${node.startPosition.row + 1}`,
+				"top-level-statement",
+				node,
+				parentId,
+			);
+			addCalls(node, statementId);
+			return;
+		}
+
+		const declarationTypes: Record<string, string> = {
+			class_declaration: "class",
+			struct_declaration: "struct",
+			interface_declaration: "interface",
+			enum_declaration: "enum",
+			record_declaration: "record",
+			delegate_declaration: "delegate",
+		};
+		const declarationKind = declarationTypes[type];
+		if (declarationKind) {
+			const declarationId = addNode(
+				qualifiedName,
+				declarationKind,
+				node,
+				parentId,
+			);
+			addBaseTypes(node, declarationId);
+			for (const child of node.namedChildren)
+				walk(child, declarationId, qualifiedName);
+			return;
+		}
+
+		const memberTypes: Record<string, string> = {
+			method_declaration: "method",
+			constructor_declaration: "constructor",
+			property_declaration: "property",
+			event_declaration: "event",
+			event_field_declaration: "event",
+			field_declaration: "field",
+		};
+		const memberKind = memberTypes[type];
+		if (memberKind) {
+			const memberName =
+				type === "event_field_declaration"
+					? (node
+							.descendantsOfType("variable_declarator")[0]
+							?.childForFieldName?.("name")?.text ?? named)
+					: named;
+			const memberId = addNode(
+				`${scope}.${memberName}`,
+				memberKind,
+				node,
+				parentId,
+			);
+			addCalls(node, memberId);
+			return;
+		}
+
+		for (const child of node.namedChildren) walk(child, parentId, scope);
+	}
+
+	walk(tree.rootNode, fileNodeId, "");
+	return { nodes, edges };
+}
+
 // ── Generic extractor (Java, C++, Rust, Ruby, Kotlin, Scala) ───────────────
 
 /** Node types that represent named definitions across languages */
@@ -919,6 +1130,8 @@ function extractFile(filePath: string, root: string): ExtractionResult {
 			return extractBash(filePath, source, root);
 		case "json":
 			return extractJson(filePath, source, root);
+		case "csharp":
+			return extractCSharp(filePath, tree);
 		case "java":
 		case "rust":
 		case "cpp":
