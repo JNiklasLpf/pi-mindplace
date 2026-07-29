@@ -1246,3 +1246,62 @@ export function extract(
 
 	return { nodes: allNodes, edges: allEdges, cached, extracted };
 }
+
+/**
+ * Extract entities while yielding between files so an interactive caller can
+ * render progress and handle cancellation.
+ */
+export async function extractAsync(
+	root: string,
+	files: string[],
+	cacheDir?: string,
+	force?: boolean,
+	onProgress?: (done: number) => void,
+	signal?: AbortSignal,
+): Promise<ExtractionResult & { cached: number; extracted: number }> {
+	const cache = cacheDir ? loadCache(cacheDir) : new Map<string, CacheEntry>();
+	const allNodes: GraphNode[] = [];
+	const allEdges: GraphEdge[] = [];
+	const seenIds = new Set<string>();
+	let cached = 0;
+	let extracted = 0;
+	let processed = 0;
+
+	for (const file of files) {
+		if (signal?.aborted) throw new Error("Mind Place build cancelled.");
+
+		const abs = resolve(root, file);
+		if (existsSync(abs)) {
+			const hash = fileHash(abs);
+			const entry = !force ? cache.get(file) : undefined;
+			if (entry?.hash === hash) {
+				for (const node of entry.nodes) {
+					if (!seenIds.has(node.id)) {
+						seenIds.add(node.id);
+						allNodes.push(node);
+					}
+				}
+				allEdges.push(...entry.edges);
+				cached++;
+			} else {
+				const result = extractFile(file, root);
+				for (const node of result.nodes) {
+					if (!seenIds.has(node.id)) {
+						seenIds.add(node.id);
+						allNodes.push(node);
+					}
+				}
+				allEdges.push(...result.edges);
+				cache.set(file, { hash, nodes: result.nodes, edges: result.edges });
+				extracted++;
+			}
+		}
+
+		processed++;
+		onProgress?.(processed);
+		await new Promise<void>((resume) => setImmediate(resume));
+	}
+
+	if (cacheDir) saveCache(cacheDir, cache);
+	return { nodes: allNodes, edges: allEdges, cached, extracted };
+}

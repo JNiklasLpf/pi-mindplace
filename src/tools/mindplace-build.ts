@@ -6,25 +6,20 @@ import { Type } from "typebox";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { detect } from "../detect.ts";
-import { extract } from "../extract.ts";
+import { extractAsync } from "../extract.ts";
 import { KnowledgeGraph } from "../graph.ts";
 import { generateReport } from "../report.ts";
 import { generateHtml, VIS_NETWORK_ASSET } from "../viz.ts";
 import {
 	addGraphOutputToGitignore,
-	isGraphOutputIgnored,
+	isGraphOutputIgnoredAtRoot,
 } from "../gitignore.ts";
-import {
-	copyFileSync,
-	writeFileSync,
-	mkdirSync,
-	existsSync,
-	readFileSync,
-} from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OUT_DIR = "graph-out";
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const VIS_NETWORK_SOURCE = fileURLToPath(
 	new URL("../../assets/vis-network.min.js", import.meta.url),
 );
@@ -78,23 +73,21 @@ export const MindplaceBuildTool = {
 			noReport?: boolean;
 			update?: boolean;
 		},
-		_signal: AbortSignal,
+		signal: AbortSignal,
 		_onUpdate: (update: unknown) => void,
 		ctx: ExtensionContext,
 	) {
-		const root = params.path ?? ctx.cwd;
+		const root = resolve(ctx.cwd, params.path ?? ".");
 		const outFile = join(root, OUT_DIR, "graph.json");
 		const graphExists = existsSync(outFile);
+		let spinner: ReturnType<typeof setInterval> | undefined;
 
 		try {
 			const gitignorePath = join(root, ".gitignore");
 			let gitignoreStatus = "";
 
 			if (ctx.hasUI) {
-				const gitignoreContents = existsSync(gitignorePath)
-					? readFileSync(gitignorePath, "utf-8")
-					: "";
-				if (!isGraphOutputIgnored(gitignoreContents)) {
+				if (!isGraphOutputIgnoredAtRoot(root)) {
 					const confirmed = await ctx.ui.confirm(
 						"Ignore Mind Place output?",
 						`Add \`graph-out/\` to \`${gitignorePath}\`? This prevents generated graph files from appearing as untracked changes.`,
@@ -118,7 +111,28 @@ export const MindplaceBuildTool = {
 				};
 			}
 
+			if (ctx.hasUI) {
+				let frame = 0;
+				const showSpinner = () => {
+					ctx.ui.setStatus(
+						"mindplace-build",
+						ctx.ui.theme.fg(
+							"accent",
+							`${SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]} Building Mind Place...`,
+						),
+					);
+				};
+				showSpinner();
+				spinner = setInterval(showSpinner, 100);
+			}
+
 			// Step 1: Detect
+			_onUpdate({
+				content: [
+					{ type: "text" as const, text: "⠋ Scanning source files..." },
+				],
+				details: { stage: "detecting" },
+			});
 			const detected = detect(root);
 			if (detected.files.length === 0) {
 				const exts = Object.keys({
@@ -145,7 +159,7 @@ export const MindplaceBuildTool = {
 			const totalToExtract = detected.files.length;
 			let lastReported = 0;
 
-			const extResult = extract(
+			const extResult = await extractAsync(
 				root,
 				detected.files,
 				cacheDir,
@@ -164,6 +178,7 @@ export const MindplaceBuildTool = {
 						});
 					}
 				},
+				signal,
 			);
 
 			// Step 3: Rebuild from the complete cached-plus-fresh extraction result.
@@ -274,6 +289,9 @@ export const MindplaceBuildTool = {
 				details: { error: String(err) },
 				isError: true,
 			};
+		} finally {
+			if (spinner) clearInterval(spinner);
+			if (ctx.hasUI) ctx.ui.setStatus("mindplace-build", undefined);
 		}
 	},
 };
