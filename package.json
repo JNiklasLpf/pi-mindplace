@@ -59,7 +59,8 @@
   "overrides": {
     "@sengac/tree-sitter-kotlin": {
       "npm-check-updates": "$npm-check-updates"
-    }
+    },
+    "tree-sitter-c": "0.23.2"
   },
   "publishConfig": {
     "access": "public"
