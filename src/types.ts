@@ -21,9 +21,29 @@ export interface GraphEdge {
 	confidenceScore?: number;
 }
 
+export interface ExtractionDiagnostic {
+	file: string;
+	reason: "oversized" | "unreadable" | "parser_failed" | "unsupported" | "unresolved_reference" | "truncated_json" | "unsupported_callable";
+	message: string;
+	referenceStatus?: "ambiguous" | "external" | "dynamic" | "unknown";
+}
+
+export interface BindingReference {
+	file: string;
+	source: string;
+	kind: "call" | "base" | "import";
+	target: string;
+	scope: string;
+	alias?: string;
+	staticImport?: boolean;
+}
+
 export interface ExtractionResult {
 	nodes: GraphNode[];
 	edges: GraphEdge[];
+	diagnostics?: ExtractionDiagnostic[];
+	/** Cached syntax-level references; resolved only after all project declarations are collected. */
+	bindingReferences?: BindingReference[];
 }
 
 export interface DetectResult {
@@ -31,6 +51,9 @@ export interface DetectResult {
 	files: string[];
 	totalFiles: number;
 	byExtension: Record<string, number>;
+	scanComplete?: boolean;
+	scanLimited?: boolean;
+	warnings?: string[];
 }
 
 export interface QueryResult {
@@ -41,6 +64,10 @@ export interface QueryResult {
 	tokensUsed: number;
 	budget: number;
 	coverage: number;
+	/** Query-time lexical relevance, deliberately distinct from PageRank centrality. */
+	relevanceByNode?: Record<string, number>;
+	scope?: string;
+	truncated?: boolean;
 }
 
 export interface GraphStats {

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-mindplace.invalid/evaluation/analysis-v1.schema.json",
+  "title": "MP2-07 paired task and uncertainty analysis",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "empirical", "harnessSimulation", "decisionEligible", "contrast", "pairing", "uncertainty", "metrics", "taskLevel", "overall"],
+  "properties": {
+    "schemaVersion": { "const": 1 }, "runId": { "type": "string" }, "empirical": { "const": true }, "harnessSimulation": { "const": false }, "decisionEligible": { "const": false },
+    "contrast": { "type": "string" }, "pairing": { "type": "string" }, "uncertainty": { "type": "string" }, "metrics": { "type": "array", "items": { "type": "string" } },
+    "taskLevel": { "type": "array", "items": { "type": "object", "required": ["taskId", "pairs", "metrics"], "properties": { "taskId": { "type": "string" }, "pairs": { "type": "integer" }, "metrics": { "type": "object" } } } },
+    "overall": { "type": "object", "description": "Paired graph_optional minus map_only mean differences and task-cluster bootstrap intervals for each declared metric." }
+  }
+}

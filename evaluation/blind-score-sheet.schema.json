@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-mindplace.invalid/evaluation/blind-score-sheet-v1.schema.json",
+  "title": "MP2-07 treatment-blinded independent score sheet",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "harnessSimulation", "scoringStatus", "scoringInstructions", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 }, "runId": { "type": "string" }, "harnessSimulation": { "type": "boolean" },
+    "scoringStatus": { "enum": ["BLIND_SCORING_REQUIRED", "BLIND_SCORING_COMPLETE"] },
+    "scoringInstructions": { "type": "string", "minLength": 1 },
+    "entries": { "type": "array", "items": {
+      "type": "object", "required": ["blindId", "taskId", "repetition", "answer", "score", "maxScore", "evidence", "scorerId"],
+      "properties": {
+        "blindId": { "type": "string" }, "taskId": { "type": "string" }, "repetition": { "type": "integer" }, "answer": { "type": "string" },
+        "failures": { "type": "array", "items": { "type": "string" } }, "score": { "type": ["integer", "number", "null"], "minimum": 0 },
+        "maxScore": { "type": ["integer", "number", "null"], "exclusiveMinimum": 0 }, "evidence": { "type": "string" }, "scorerId": { "type": "string" }
+      }
+    } }
+  }
+}

@@ -1,7 +1,7 @@
 {
   "name": "@patimweb/pi-mindplace",
   "version": "1.4.2",
-  "description": "graphify-style code knowledge graph for pi — build a queryable mind place that saves tokens on every session. Parses your code with tree-sitter into a navigable graph with community detection, PageRank, and token-budget-aware queries.",
+  "description": "Optional local code-navigation graph for pi. Parses supported source with tree-sitter and provides relevance-ranked, character-budgeted graph queries with advisory lifecycle guidance.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -15,7 +15,6 @@
     "tree-sitter",
     "ast",
     "static-analysis",
-    "token-optimization",
     "pagerank",
     "louvain"
   ],
@@ -33,8 +32,13 @@
     "url": "https://github.com/Smotherer007/pi-mindplace/issues"
   },
   "scripts": {
-    "test": "node --experimental-test-module-mocks --experimental-test-coverage --test tests/csharp.test.ts tests/detect.test.ts tests/extract.test.ts tests/gitignore.test.ts tests/graph.test.ts tests/kotlin.test.ts tests/query.test.ts tests/viz.test.ts",
-    "test:watch": "node --experimental-test-module-mocks --test --watch 'tests/**/*.test.ts'"
+    "test": "node --experimental-test-module-mocks --experimental-test-coverage --test tests/binding-regressions.test.ts tests/build-tool.test.ts tests/csharp.test.ts tests/detect.test.ts tests/extract.test.ts tests/extraction-cache.test.ts tests/freshness-quality.test.ts tests/gitignore.test.ts tests/graph.test.ts tests/kotlin.test.ts tests/query.test.ts tests/tool-regressions.test.ts tests/viz.test.ts",
+    "test:focused": "node --experimental-test-module-mocks --test tests/binding-regressions.test.ts tests/build-tool.test.ts tests/extraction-cache.test.ts tests/freshness-quality.test.ts tests/tool-regressions.test.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "test:watch": "node --experimental-test-module-mocks --test --watch 'tests/**/*.test.ts'",
+    "mp2-eval:proposal": "node scripts/mp2-eval.mjs --proposal",
+    "mp2-eval:smoke": "node scripts/mp2-eval.mjs --smoke",
+    "mp2-eval:run": "node scripts/mp2-eval.mjs --run"
   },
   "dependencies": {
     "@sengac/tree-sitter-kotlin": "0.4.6",
@@ -54,12 +58,14 @@
     "tree-sitter-typescript": "^0.23.2"
   },
   "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "overrides": {
     "@sengac/tree-sitter-kotlin": {
       "npm-check-updates": "$npm-check-updates"
     },
+    "@earendil-works/pi-ai": "1.2.0",
     "tree-sitter-c": "0.23.2"
   },
   "publishConfig": {
@@ -67,8 +73,12 @@
   },
   "devDependencies": {
     "@semantic-release/git": "^10.0.0",
-    "@types/node": "^26.1.1",
-    "semantic-release": "^25.0.0"
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@modelcontextprotocol/sdk": "1.25.2",
+    "@types/node": "22.19.19",
+    "semantic-release": "^25.0.0",
+    "typebox": "1.3.27",
+    "typescript": "5.9.3"
   },
   "pi": {
     "extensions": [

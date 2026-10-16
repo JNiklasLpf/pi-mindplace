@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { KnowledgeGraph } from "../src/graph.ts";
-import { query, formatQueryResult } from "../src/query.ts";
+import { query, formatQueryResult, estimateQueryTokens } from "../src/query.ts";
 import type { ExtractionResult } from "../src/types.ts";
 
 function sampleGraph(): KnowledgeGraph {
@@ -116,7 +116,9 @@ describe("query", () => {
     const result = query(kg, "anything", 1000);
 
     assert.equal(result.nodes.length, 0);
-    assert.equal(result.tokensUsed, 0);
+    assert.ok(result.tokensUsed > 0, "formatted empty responses still have an output-size estimate");
+    assert.equal(result.tokensUsed, estimateQueryTokens(formatQueryResult(result)));
+    assert.ok(result.tokensUsed <= result.budget);
   });
 
   it("returns empty for unrelated query", () => {

@@ -3,7 +3,7 @@
  */
 
 import { Type } from "typebox";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { detect } from "../detect.ts";
 import { extractAsync } from "../extract.ts";
@@ -14,9 +14,31 @@ import {
 	addGraphOutputToGitignore,
 	isGraphOutputIgnoredAtRoot,
 } from "../gitignore.ts";
-import { copyFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { copyFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { normalizeProjectRoot } from "../paths.ts";
+import { makeGraphMetadata, markBuildInProgress, clearBuildInProgress } from "../graph-file.ts";
+import type { ExtractionDiagnostic, GraphStats } from "../types.ts";
 import { fileURLToPath } from "node:url";
+
+export type MindplaceBuildDetails =
+	| { skipped: true }
+	| { status: "no_supported_source"; totalFiles: number; scanComplete: boolean | undefined; warnings: string[] | undefined }
+	| { status: "cancelled"; root: string }
+	| { status: "empty_extraction"; root: string; detectedFiles: number; extractedFiles: number; cachedFiles: number; skippedFiles: number; diagnostics: ExtractionDiagnostic[] }
+	| ({
+			status: "partial" | "complete";
+			cachedFiles: number;
+			extractedFiles: number;
+			scanComplete: boolean | undefined;
+			scanLimited: boolean | undefined;
+			warnings: string[] | undefined;
+			diagnostics: ExtractionDiagnostic[];
+			cacheHits: number;
+			skippedFiles: number;
+		} & GraphStats)
+	| { status: "cancelled" | "execution_error"; error: string };
 
 const OUT_DIR = "graph-out";
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -32,8 +54,8 @@ export const MindplaceBuildTool = {
 	name: "mindplace_build",
 	label: "Build Mind Place",
 	description:
-		"Scan the current project and build a knowledge graph of all code entities (functions, classes, imports). Supports JavaScript, TypeScript, Python, Go, C#, Bash, JSON, and more. The graph is persisted to graph-out/ for fast queries across sessions.",
-	promptSnippet: "Build a code knowledge graph for token-efficient queries",
+		"Scan the current project and build a knowledge graph of all code entities (functions, classes, imports). Supports JavaScript, TypeScript, Python, Go, C#, Bash, JSON, and more. The graph is persisted to graph-out/ for optional queries across sessions.",
+	promptSnippet: "Optionally build a local code navigation graph",
 	parameters: Type.Object({
 		path: Type.Optional(
 			Type.String({ description: "Project root path. Defaults to cwd." }),
@@ -62,6 +84,9 @@ export const MindplaceBuildTool = {
 				default: false,
 			}),
 		),
+		autoIgnore: Type.Optional(
+			Type.Boolean({ description: "Add graph-out/ to .gitignore when needed (default true; false for read-only/review builds)", default: true }),
+		),
 	}),
 	async execute(
 		_toolCallId: string,
@@ -72,31 +97,24 @@ export const MindplaceBuildTool = {
 			noViz?: boolean;
 			noReport?: boolean;
 			update?: boolean;
+			autoIgnore?: boolean;
 		},
 		signal: AbortSignal,
 		_onUpdate: (update: unknown) => void,
 		ctx: ExtensionContext,
-	) {
-		const root = resolve(ctx.cwd, params.path ?? ".");
+	): Promise<AgentToolResult<MindplaceBuildDetails>> {
+		const root = normalizeProjectRoot(ctx.cwd, params.path);
 		const outFile = join(root, OUT_DIR, "graph.json");
 		const graphExists = existsSync(outFile);
 		let spinner: ReturnType<typeof setInterval> | undefined;
+		markBuildInProgress(root);
 
 		try {
-			const gitignorePath = join(root, ".gitignore");
 			let gitignoreStatus = "";
-
-			if (ctx.hasUI) {
-				if (!isGraphOutputIgnoredAtRoot(root)) {
-					const confirmed = await ctx.ui.confirm(
-						"Ignore Mind Place output?",
-						`Add \`graph-out/\` to \`${gitignorePath}\`? This prevents generated graph files from appearing as untracked changes.`,
-					);
-					if (confirmed && addGraphOutputToGitignore(root)) {
-						gitignoreStatus = `Added \`graph-out/\` to \`.gitignore\`.`;
-					}
-				}
-			}
+			if (
+				graphExists && params.autoIgnore !== false &&
+				!isGraphOutputIgnoredAtRoot(root) && addGraphOutputToGitignore(root)
+			) gitignoreStatus = `Added \`graph-out/\` to \`.gitignore\`.`;
 
 			if (!params.force && !params.update && graphExists) {
 				const statusSuffix = gitignoreStatus ? `\n\n${gitignoreStatus}` : "";
@@ -150,9 +168,14 @@ export const MindplaceBuildTool = {
 							text: `No supported code files found in ${root}. Supported: ${exts}`,
 						},
 					],
-					details: { totalFiles: 0 },
+					details: { status: "no_supported_source", totalFiles: 0, scanComplete: detected.scanComplete, warnings: detected.warnings },
 				};
 			}
+
+			// Fingerprint sources before extraction so a source edit during the build
+			// makes the persisted graph report stale instead of being recorded as fresh.
+			const freshnessMetadata = makeGraphMetadata(root, detected);
+			if (!freshnessMetadata.scanComplete) throw new Error("Could not establish a complete source inventory before build; no current graph was published.");
 
 			// Step 2: Extract with cache — report progress
 			const cacheDir = join(root, OUT_DIR, "cache");
@@ -181,6 +204,24 @@ export const MindplaceBuildTool = {
 				signal,
 			);
 
+			if (signal.aborted) {
+				return { content: [{ type: "text" as const, text: "Mind Place build cancelled before graph output was written." }], details: { status: "cancelled", root } };
+			}
+			if (extResult.nodes.length === 0) {
+				return {
+					content: [{ type: "text" as const, text: `No graph entities could be extracted from ${detected.totalFiles} supported files. No graph/report/visualization was written. See diagnostics for skipped files.` }],
+					details: { status: "empty_extraction", root, detectedFiles: detected.totalFiles, extractedFiles: extResult.extracted, cachedFiles: extResult.cached, skippedFiles: extResult.skippedFiles, diagnostics: extResult.diagnostics },
+				};
+			}
+
+			if (
+				params.autoIgnore !== false &&
+				!isGraphOutputIgnoredAtRoot(root) &&
+				addGraphOutputToGitignore(root)
+			) {
+				gitignoreStatus = `Added \`graph-out/\` to \`.gitignore\`.`;
+			}
+
 			// Step 3: Rebuild from the complete cached-plus-fresh extraction result.
 			// `extract` re-parses only changed files, while rebuilding prevents stale
 			// nodes/edges from deleted or changed files and avoids duplicate edges.
@@ -191,9 +232,22 @@ export const MindplaceBuildTool = {
 			kg.detectCommunities();
 			const stats = kg.stats();
 
-			// Step 5: Persist
+			// Verify the supported-source inventory again after extraction. A detected edit
+			// fails closed rather than publishing a graph as current.
+			const postBuildMetadata = makeGraphMetadata(root, detect(root));
+			if (!postBuildMetadata.scanComplete || JSON.stringify(postBuildMetadata.inventory) !== JSON.stringify(freshnessMetadata.inventory)) {
+				throw new Error("Supported sources changed during build; no graph was published. Retry the build.");
+			}
+
+			// Step 5: Atomically publish the complete graph JSON.
 			mkdirSync(join(root, OUT_DIR), { recursive: true });
-			writeFileSync(outFile, JSON.stringify(kg.toJSON(), null, 2), "utf-8");
+			const tempFile = `${outFile}.${process.pid}.${randomUUID()}.tmp`;
+			try {
+				writeFileSync(tempFile, JSON.stringify({ ...kg.toJSON() as object, mindplace: freshnessMetadata }, null, 2), "utf-8");
+				renameSync(tempFile, outFile);
+			} finally {
+				try { unlinkSync(tempFile); } catch { /* renamed or already absent */ }
+			}
 
 			let reportPath = "";
 			let htmlPath = "";
@@ -244,6 +298,8 @@ export const MindplaceBuildTool = {
 				`| Edges | ${stats.edgeCount} |`,
 				`| Communities | ${stats.communityCount} |`,
 				`| Mode | ${params.directed ? "directed" : "undirected"} |`,
+				`| Skipped files | ${extResult.skippedFiles} |`,
+				`| Extraction diagnostics | ${extResult.diagnostics.length} |`,
 			];
 
 			if (reportPath)
@@ -260,6 +316,11 @@ export const MindplaceBuildTool = {
 				});
 			}
 
+			if (extResult.diagnostics.length > 0) {
+				outputs.push(``, `### Extraction diagnostics`);
+				for (const diagnostic of extResult.diagnostics.slice(0, 8)) outputs.push(`- ${diagnostic.file}: ${diagnostic.reason} — ${diagnostic.message}`);
+				if (extResult.diagnostics.length > 8) outputs.push(`- … ${extResult.diagnostics.length - 8} more diagnostics in tool details.`);
+			}
 			if (gitignoreStatus) {
 				outputs.push(``);
 				outputs.push(gitignoreStatus);
@@ -276,6 +337,13 @@ export const MindplaceBuildTool = {
 					...stats,
 					cachedFiles: extResult.cached,
 					extractedFiles: extResult.extracted,
+					status: extResult.diagnostics.length > 0 || !detected.scanComplete ? "partial" : "complete",
+					scanComplete: detected.scanComplete,
+					scanLimited: detected.scanLimited,
+					warnings: detected.warnings,
+					diagnostics: extResult.diagnostics,
+					cacheHits: extResult.cached,
+					skippedFiles: extResult.skippedFiles,
 				},
 			};
 		} catch (err) {
@@ -286,10 +354,11 @@ export const MindplaceBuildTool = {
 						text: `Failed to build mind place: ${err instanceof Error ? err.message : String(err)}`,
 					},
 				],
-				details: { error: String(err) },
+				details: { status: signal.aborted || String(err).includes("cancelled") ? "cancelled" : "execution_error", error: String(err) },
 				isError: true,
 			};
 		} finally {
+			clearBuildInProgress(root);
 			if (spinner) clearInterval(spinner);
 			if (ctx.hasUI) ctx.ui.setStatus("mindplace-build", undefined);
 		}

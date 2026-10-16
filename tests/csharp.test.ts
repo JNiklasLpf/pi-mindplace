@@ -30,7 +30,8 @@ public class Greeter : IGreeter {
   public string Name { get; set; }
   public event EventHandler? Changed;
   public Greeter(string name) { Name = name; }
-  public string Greet(User user) { Changed?.Invoke(this, EventArgs.Empty); return user.Name; }
+  public string Greet(User user) { Changed?.Invoke(this, EventArgs.Empty); return Format(user.Name); }
+  string Format(string value) { return value; }
 }
 public delegate void ChangedHandler(object sender);
 `,
@@ -38,7 +39,7 @@ public delegate void ChangedHandler(object sender);
 	);
 	writeFileSync(
 		join(root, "Program.cs"),
-		'System.Console.WriteLine("hello");',
+		'using Demo.Services;\nSystem.Console.WriteLine("hello");',
 		"utf-8",
 	);
 	return root;

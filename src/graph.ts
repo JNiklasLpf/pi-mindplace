@@ -21,6 +21,13 @@ export class KnowledgeGraph {
   outgoing: Map<string, Set<string>> = new Map();
   /** Whether the graph preserves edge direction */
   isDirected: boolean = false;
+  /** One O(V) file/symbol index per graph instance (a graph instance is one generation). */
+  private fileSymbolIndex?: {
+    nodes: Map<string, GraphNode>;
+    size: number;
+    fileNodes: GraphNode[];
+    symbolsBySourceFile: Map<string, GraphNode[]>;
+  };
 
   /** Build graph from extraction results */
   static fromExtraction(result: ExtractionResult, directed: boolean = false): KnowledgeGraph {
@@ -196,8 +203,24 @@ export class KnowledgeGraph {
   fileRanking(
     limit: number = 40,
   ): Array<{ file: string; score: number; symbols: Array<{ label: string; type: string; centrality: number }> }> {
-    // Collect file nodes
-    const fileNodes = [...this.nodes.values()].filter(n => n.type === "file");
+    // A KnowledgeGraph instance represents one graph generation. Keep a single
+    // O(V) index on that instance, rather than scanning every node per result file.
+    let index = this.fileSymbolIndex;
+    if (!index || index.nodes !== this.nodes || index.size !== this.nodes.size) {
+      const fileNodes: GraphNode[] = [];
+      const symbolsBySourceFile = new Map<string, GraphNode[]>();
+      for (const node of this.nodes.values()) {
+        if (node.type === "file") fileNodes.push(node);
+        else {
+          const symbols = symbolsBySourceFile.get(node.sourceFile) ?? [];
+          symbols.push(node);
+          symbolsBySourceFile.set(node.sourceFile, symbols);
+        }
+      }
+      index = { nodes: this.nodes, size: this.nodes.size, fileNodes, symbolsBySourceFile };
+      this.fileSymbolIndex = index;
+    }
+    const fileNodes = index.fileNodes;
     if (fileNodes.length === 0) return [];
 
     // Build file-level adjacency + lookup: sourceFile → file node ID
@@ -264,8 +287,7 @@ export class KnowledgeGraph {
       if (!fileNode) continue;
 
       // Find symbols contained in this file
-      const symbols = [...this.nodes.values()]
-        .filter(n => n.sourceFile === fileNode.sourceFile && n.type !== "file")
+      const symbols = (index.symbolsBySourceFile.get(fileNode.sourceFile) ?? [])
         .map(n => ({ label: n.label, type: n.type, centrality: n.centrality ?? 0 }))
         .sort((a, b) => b.centrality - a.centrality)
         .slice(0, 6);

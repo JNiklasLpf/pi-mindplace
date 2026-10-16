@@ -1,0 +1,3 @@
+# Synthetic multi-module C# service (36 source files)
+
+Map: API routes are under `src/Api`; application handlers, policy, validation, and services are under `src/Application`; persistence contracts and adapters are under `src/Infrastructure`. The order submission path spans several application layers before persistence. Returns, Inventory, Payments, Shipping, Customers, Reporting, and Subscriptions are separate feature modules containing deliberately similar method names; verify namespace and caller edges rather than matching a method name alone. This repository is synthetic and has no project file or external dependencies.
