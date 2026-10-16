@@ -3,3 +3,4 @@ graph-out/
 .pi-subagents/
 *.wasm
 .DS_Store
+.pi/
