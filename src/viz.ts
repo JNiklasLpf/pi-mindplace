@@ -12,85 +12,145 @@
 
 import type { KnowledgeGraph } from "./graph.ts";
 
-const VIS_JS = "https://unpkg.com/vis-network@9.1.6/dist/vis-network.min.js";
-const VIS_CSS = "https://unpkg.com/vis-network@9.1.6/dist/vis-network.min.css";
+export const VIS_NETWORK_ASSET = "vis-network.min.js";
 const MAX_VIZ_NODES = 1500;
 const MAX_EDGES = 4000;
 
-export function generateHtml(kg: KnowledgeGraph, title: string = "Mind Place"): string {
-  // Sort non-file nodes by degree, take top
-  const nonFileNodes = [...kg.nodes.values()]
-    .filter(n => n.type !== "file")
-    .map(n => ({ node: n, degree: kg.adjacency.get(n.id)?.size ?? 0 }))
-    .sort((a, b) => b.degree - a.degree);
+function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
 
-  const cappedNodes = nonFileNodes.slice(0, MAX_VIZ_NODES);
-  const cappedIds = new Set(cappedNodes.map(n => n.node.id));
+/** Safely serialize data embedded within a classic HTML script element. */
+function serializeForScript(value: unknown): string {
+	return JSON.stringify(value)
+		.replace(/</g, "\\u003c")
+		.replace(/>/g, "\\u003e")
+		.replace(/&/g, "\\u0026")
+		.replace(/\u2028/g, "\\u2028")
+		.replace(/\u2029/g, "\\u2029");
+}
 
-  // Colors from graphify's palette
-  const COLORS = [
-    "#4E79A7","#F28E2B","#E15759","#76B7B2","#59A14F",
-    "#EDC948","#B07AA1","#FF9DA7","#9C755F","#BAB0AC",
-    "#6A3D9A","#FF7F00","#33A02C","#1F78B4","#E31A1C",
-    "#FDBF6F","#A6CEE3","#B2DF8A","#FB9A99","#CAB2D6",
-    "#FFFF99","#B15928","#8DD3C7","#FFFFB3","#BEBADA",
-  ];
+export function generateHtml(
+	kg: KnowledgeGraph,
+	title: string = "Mind Place",
+): string {
+	// Sort non-file nodes by degree, take top
+	const nonFileNodes = [...kg.nodes.values()]
+		.filter((n) => n.type !== "file")
+		.map((n) => ({ node: n, degree: kg.adjacency.get(n.id)?.size ?? 0 }))
+		.sort((a, b) => b.degree - a.degree);
 
-  // Build nodes
-  const nodes = cappedNodes.map(n => {
-    const node = n.node;
-    const comm = node.community ?? 0;
-    return {
-      id: node.id, label: node.label, color: COLORS[comm % COLORS.length],
-      size: Math.max(5, Math.min(25, Math.log2(n.degree + 2) * 8)),
-      font: { size: 10, color: "#ddd" },
-      title: `<b>${node.label}</b> (${node.type})<br>${node.sourceFile}${node.sourceLocation ? " " + node.sourceLocation : ""}<br>${n.degree} connections`,
-      community: comm,
-      sourceFile: node.sourceFile, fileType: node.type, degree: n.degree,
-    };
-  });
+	const cappedNodes = nonFileNodes.slice(0, MAX_VIZ_NODES);
+	const cappedIds = new Set(cappedNodes.map((n) => n.node.id));
 
-  // Build edges (only between capped nodes)
-  const edges = [];
-  for (const edge of kg.edges) {
-    if (edges.length >= MAX_EDGES) break;
-    if (!cappedIds.has(edge.source) || !cappedIds.has(edge.target)) continue;
-    edges.push({
-      from: edge.source, to: edge.target,
-      title: `${edge.relation} [${edge.confidence}]`,
-      dashes: edge.confidence !== "EXTRACTED",
-      width: edge.confidence === "EXTRACTED" ? 1 : 0.5,
-      color: { color: edge.confidence === "EXTRACTED" ? "#555" : "#444", opacity: edge.confidence === "EXTRACTED" ? 0.4 : 0.25 },
-    });
-  }
+	// Colors from graphify's palette
+	const COLORS = [
+		"#4E79A7",
+		"#F28E2B",
+		"#E15759",
+		"#76B7B2",
+		"#59A14F",
+		"#EDC948",
+		"#B07AA1",
+		"#FF9DA7",
+		"#9C755F",
+		"#BAB0AC",
+		"#6A3D9A",
+		"#FF7F00",
+		"#33A02C",
+		"#1F78B4",
+		"#E31A1C",
+		"#FDBF6F",
+		"#A6CEE3",
+		"#B2DF8A",
+		"#FB9A99",
+		"#CAB2D6",
+		"#FFFF99",
+		"#B15928",
+		"#8DD3C7",
+		"#FFFFB3",
+		"#BEBADA",
+	];
 
-  // Legend
-  const legend = new Map<number, { label: string; color: string; count: number }>();
-  for (const n of cappedNodes) {
-    const comm = n.node.community ?? 0;
-    const c = legend.get(comm) ?? { label: `Community ${comm}`, color: COLORS[comm % COLORS.length], count: 0 };
-    c.count++;
-    if (c.label === `Community ${comm}`) c.label = n.node.label;
-    legend.set(comm, c);
-  }
-  const legendArr = [...legend.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 50);
+	// Build nodes
+	const nodes = cappedNodes.map((n) => {
+		const node = n.node;
+		const comm = node.community ?? 0;
+		return {
+			id: node.id,
+			label: node.label,
+			color: COLORS[comm % COLORS.length],
+			size: Math.max(5, Math.min(25, Math.log2(n.degree + 2) * 8)),
+			font: { size: 10, color: "#ddd" },
+			community: comm,
+			sourceFile: node.sourceFile,
+			sourceLocation: node.sourceLocation,
+			fileType: node.type,
+			degree: n.degree,
+		};
+	});
 
-  const totalNodes = kg.nodes.size;
-  const shownInfo = cappedNodes.length < nonFileNodes.length
-    ? `Showing ${cappedNodes.length} of ${nonFileNodes.length} nodes (top by connections)`
-    : `${cappedNodes.length} nodes`;
+	// Build edges (only between capped nodes)
+	const edges = [];
+	for (const edge of kg.edges) {
+		if (edges.length >= MAX_EDGES) break;
+		if (!cappedIds.has(edge.source) || !cappedIds.has(edge.target)) continue;
+		edges.push({
+			from: edge.source,
+			to: edge.target,
+			title: `${edge.relation} [${edge.confidence}]`,
+			dashes: edge.confidence !== "EXTRACTED",
+			width: edge.confidence === "EXTRACTED" ? 1 : 0.5,
+			color: {
+				color: edge.confidence === "EXTRACTED" ? "#555" : "#444",
+				opacity: edge.confidence === "EXTRACTED" ? 0.4 : 0.25,
+			},
+		});
+	}
 
-  return `<!DOCTYPE html>
+	// Legend
+	const legend = new Map<
+		number,
+		{ label: string; color: string; count: number }
+	>();
+	for (const n of cappedNodes) {
+		const comm = n.node.community ?? 0;
+		const c = legend.get(comm) ?? {
+			label: `Community ${comm}`,
+			color: COLORS[comm % COLORS.length],
+			count: 0,
+		};
+		c.count++;
+		if (c.label === `Community ${comm}`) c.label = n.node.label;
+		legend.set(comm, c);
+	}
+	const legendArr = [...legend.entries()]
+		.sort((a, b) => b[1].count - a[1].count)
+		.slice(0, 50);
+
+	const totalNodes = kg.nodes.size;
+	const shownInfo =
+		cappedNodes.length < nonFileNodes.length
+			? `Showing ${cappedNodes.length} of ${nonFileNodes.length} nodes (top by connections)`
+			: `${cappedNodes.length} nodes`;
+
+	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${title} - Mind Place</title>
-<link rel="stylesheet" href="${VIS_CSS}">
+<title>${escapeHtml(title)} - Mind Place</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0f0f1a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;height:100vh;overflow:hidden}
-#graph{flex:1}
+#graph{flex:1;position:relative}
+#tooltip{display:none;position:absolute;z-index:10;max-width:300px;padding:8px 10px;border:1px solid #3a3a5e;border-radius:5px;background:#1a1a2e;color:#ccc;font-size:12px;line-height:1.5;pointer-events:none;box-shadow:0 3px 12px #0008}
+#tooltip b{color:#e0e0e0}
 #sidebar{width:280px;background:#1a1a2e;border-left:1px solid #2a2a4e;display:flex;flex-direction:column;overflow:hidden}
 #search-wrap{padding:12px;border-bottom:1px solid #2a2a4e}
 #search{width:100%;background:#0f0f1a;border:1px solid #3a3a5e;color:#e0e0e0;padding:7px 10px;border-radius:6px;font-size:13px;outline:none}
@@ -123,6 +183,7 @@ body{background:#0f0f1a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFo
 </head>
 <body>
 <div id="graph"></div>
+<div id="tooltip" role="tooltip"></div>
 <div id="sidebar">
   <div id="search-wrap"><input type="text" id="search" placeholder="Search nodes..."></div>
   <div id="search-results"></div>
@@ -137,18 +198,18 @@ body{background:#0f0f1a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFo
   </div>
   <div id="stats">${shownInfo} · ${edges.length} edges · ${totalNodes} total</div>
 </div>
-<script src="${VIS_JS}"></script>
+<script src="./${VIS_NETWORK_ASSET}"></script>
 <script>
-const RAW_NODES = ${JSON.stringify(nodes)};
-const RAW_EDGES = ${JSON.stringify(edges)};
-const LEGEND = ${JSON.stringify(legendArr)};
-const COLORS = ${JSON.stringify(COLORS)};
+const RAW_NODES = ${serializeForScript(nodes)};
+const RAW_EDGES = ${serializeForScript(edges)};
+const LEGEND = ${serializeForScript(legendArr)};
+const COLORS = ${serializeForScript(COLORS)};
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 const nodesDS = new vis.DataSet(RAW_NODES.map(n=>({
-  id:n.id,label:n.label,color:n.color,size:n.size,font:n.font,title:n.title,
-  _c:n.community,_f:n.sourceFile,_t:n.fileType,_d:n.degree
+  id:n.id,label:n.label,color:n.color,size:n.size,font:n.font,
+  _c:n.community,_f:n.sourceFile,_l:n.sourceLocation,_t:n.fileType,_d:n.degree
 })));
 const edgesDS = new vis.DataSet(RAW_EDGES.map((e,i)=>({
   id:i,from:e.from,to:e.to,title:e.title,dashes:e.dashes,width:e.width,color:e.color,
@@ -182,9 +243,18 @@ function showInfo(id){
 }
 function focusNode(id){network.focus(id,{scale:1.4,animation:true});network.selectNodes([id]);showInfo(id);}
 
+const tooltip=document.getElementById('tooltip');
+function showTooltip(id,point){
+  const n=nodesDS.get(id);if(!n)return;
+  const location=n._l?' '+esc(n._l):'';
+  tooltip.innerHTML='<b>'+esc(n.label)+'</b> ('+esc(n._t||'?')+')<br>'+esc(n._f||'')+location+'<br>'+esc(n._d)+' connections';
+  tooltip.style.left=(point.x+12)+'px';tooltip.style.top=(point.y+12)+'px';tooltip.style.display='block';
+}
+function hideTooltip(){tooltip.style.display='none';}
+
 let hovered=null;
-network.on('hoverNode',p=>{hovered=p.node;});
-network.on('blurNode',()=>{hovered=null;});
+network.on('hoverNode',p=>{hovered=p.node;showTooltip(p.node,p.pointer.DOM);});
+network.on('blurNode',()=>{hovered=null;hideTooltip();});
 network.on('click',p=>{if(p.nodes.length>0)showInfo(p.nodes[0]);else if(!hovered)document.getElementById('info-content').innerHTML='<span class="empty">Click a node to inspect it</span>';});
 
 const si=document.getElementById('search'),sr=document.getElementById('search-results');

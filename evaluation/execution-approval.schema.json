@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-mindplace.invalid/evaluation/execution-approval-v1.schema.json",
+  "title": "MP2-07 explicit model execution approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "approved", "approvedBy", "approvedAt", "manifestSha256", "fixtureDigest", "harnessSha256", "sourceTreeSha256", "provider", "model", "settings", "repetitions", "environment", "rubricSha256", "adapterId", "adapterVersion", "piSdkVersion", "piSdkIntegrity", "adapterCommand", "adapterArgs", "adapterEntry", "adapterEntrySha256"],
+  "allOf": [{ "if": { "properties": { "repetitions": { "const": 1 } }, "required": ["repetitions"] }, "then": { "required": ["liveSmoke"], "properties": { "liveSmoke": { "const": true } } } }, { "if": { "properties": { "repetitions": { "minimum": 2 } }, "required": ["repetitions"] }, "then": { "properties": { "liveSmoke": { "const": false } } } }],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "approved": { "const": true },
+    "approvedBy": { "type": "string", "minLength": 1 },
+    "approvedAt": { "type": "string", "format": "date-time" },
+    "manifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "fixtureDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "harnessSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sourceTreeSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "provider": { "const": "github-copilot" },
+    "model": { "const": "gpt-6-luna" },
+    "settings": { "type": "object", "additionalProperties": false, "required": ["contextEstimateTokens", "maxOutputTokens", "ordinaryToolCalls", "graphToolCalls", "timeLimitSeconds", "thinkingLevel"], "properties": { "contextEstimateTokens": { "const": 16000 }, "maxOutputTokens": { "const": 2048 }, "ordinaryToolCalls": { "const": 32 }, "graphToolCalls": { "const": 16 }, "timeLimitSeconds": { "const": 600 }, "thinkingLevel": { "const": "off" } } },
+    "repetitions": { "type": "integer", "minimum": 1, "description": "Full runs require at least 2; 1 is accepted only with liveSmoke=true for the explicitly labeled mp2-live-smoke-v1 manifest (decision-ineligible)." },
+    "liveSmoke": { "type": "boolean", "description": "Must be true only for the one-task one-repetition LIVE SMOKE approval; false for full evaluation." },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nodeVersion", "platform", "arch", "osRelease", "cpuModel", "logicalCpuCount", "locale", "timezone"],
+      "properties": { "nodeVersion": { "type": "string" }, "platform": { "type": "string" }, "arch": { "type": "string" }, "osRelease": { "type": "string" }, "cpuModel": { "type": "string" }, "logicalCpuCount": { "type": "integer" }, "locale": { "type": "string" }, "timezone": { "type": "string" } }
+    },
+    "rubricSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "adapterId": { "const": "pi-mindplace-mp2-pi-sdk-luna" },
+    "adapterVersion": { "const": "mp2-pi-sdk-luna-1.0.0" },
+    "piSdkVersion": { "const": "1.2.0" },
+    "piSdkIntegrity": { "type": "string", "pattern": "^sha512-[A-Za-z0-9+/=]+$", "description": "package-lock.json integrity of the pinned Pi SDK; must equal the lock entry for the exact declared dependency." },
+    "adapterCommand": { "type": "string", "minLength": 1 },
+    "adapterArgs": { "type": "array", "items": { "type": "string" } },
+    "adapterEntry": { "type": "string", "minLength": 1, "description": "Absolute path; must be identical to one adapterArgs element (the adapter spawns with the fixture workspace as cwd)." },
+    "adapterEntrySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

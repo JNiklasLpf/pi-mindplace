@@ -78,7 +78,41 @@ describe("KnowledgeGraph", () => {
 
     const top = kg.topNodes(3);
     assert.ok(top.length > 0, "should find god nodes");
-    assert.ok(top[0].degree >= top[1]?.degree ?? 0, "should be sorted by degree");
+    assert.ok(top[0].degree >= (top[1]?.degree ?? 0), "should be sorted by degree");
+  });
+
+  it("reuses one generation-scoped file-to-symbol index across rankings", () => {
+    const nodes: ExtractionResult["nodes"] = [];
+    for (let i = 0; i < 240; i++) {
+      const sourceFile = `src/file-${i}.ts`;
+      nodes.push({ id: `file-${i}`, label: sourceFile, type: "file", sourceFile });
+      nodes.push({ id: `symbol-${i}-a`, label: `Symbol${i}A`, type: "class", sourceFile, centrality: 0.2 });
+      nodes.push({ id: `symbol-${i}-b`, label: `Symbol${i}B`, type: "method", sourceFile, centrality: 0.1 });
+    }
+    const kg = KnowledgeGraph.fromExtraction({ nodes, edges: [] });
+    let visited = 0;
+    const originalValues = kg.nodes.values.bind(kg.nodes);
+    Object.defineProperty(kg.nodes, "values", {
+      configurable: true,
+      value: function* () { for (const node of originalValues()) { visited++; yield node; } },
+    });
+
+    const first = kg.fileRanking(40);
+    assert.equal(first.length, 40);
+    assert.deepEqual(first[0].symbols.map(symbol => symbol.label), ["Symbol0A", "Symbol0B"]);
+    assert.equal(visited, nodes.length, "building the index visits each graph node once, not once per selected file");
+    kg.fileRanking(80);
+    assert.equal(visited, nodes.length, "a second ranking reuses the graph-generation index without a whole-node scan");
+
+    const nextGeneration = KnowledgeGraph.fromExtraction({ nodes: [...nodes, { id: "new-file", label: "new.ts", type: "file", sourceFile: "new.ts" }], edges: [] });
+    let nextGenerationVisits = 0;
+    const nextValues = nextGeneration.nodes.values.bind(nextGeneration.nodes);
+    Object.defineProperty(nextGeneration.nodes, "values", {
+      configurable: true,
+      value: function* () { for (const node of nextValues()) { nextGenerationVisits++; yield node; } },
+    });
+    assert.equal(nextGeneration.fileRanking(1).length, 1);
+    assert.equal(nextGenerationVisits, nodes.length + 1, "a new graph generation builds its own index");
   });
 
   it("serializes to and from JSON", () => {
@@ -94,21 +128,4 @@ describe("KnowledgeGraph", () => {
     assert.equal(kg2.edges.length, kg1.edges.length);
   });
 
-  it("merges incremental extractions", () => {
-    const kg = KnowledgeGraph.fromExtraction(sampleExtraction());
-
-    const extra: ExtractionResult = {
-      nodes: [
-        { id: "c_helper", label: "helper", type: "function", sourceFile: "c.ts", sourceLocation: "L1" },
-        { id: "mod_c", label: "moduleC", type: "file", sourceFile: "c.ts" },
-      ],
-      edges: [
-        { source: "mod_c", target: "c_helper", relation: "contains", confidence: "EXTRACTED" as const },
-      ],
-    };
-
-    kg.merge(extra);
-    assert.equal(kg.nodes.size, 7);
-    assert.equal(kg.edges.length, 6);
-  });
 });

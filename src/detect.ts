@@ -23,7 +23,7 @@ const DEFAULT_IGNORE = new Set([
   ".graphify",
 ]);
 
-const MAX_FILES = 10_000;
+export const MAX_DETECTED_FILES = 10_000;
 
 export function detect(rootPath: string): DetectResult {
   const absRoot = resolve(rootPath);
@@ -34,19 +34,32 @@ export function detect(rootPath: string): DetectResult {
 
   const files: string[] = [];
   const byExtension: Record<string, number> = {};
+  const warnings: string[] = [];
+  let scanComplete = true;
+  let scanLimited = false;
 
   function walk(dir: string): void {
-    if (files.length >= MAX_FILES) return;
+    if (files.length >= MAX_DETECTED_FILES) {
+      scanLimited = true;
+      scanComplete = false;
+      return;
+    }
 
     let entries: string[];
     try {
       entries = readdirSync(dir);
-    } catch {
+    } catch (error) {
+      scanComplete = false;
+      warnings.push(`Unable to read directory ${dir}: ${String(error)}`);
       return;
     }
 
     for (const name of entries) {
-      if (files.length >= MAX_FILES) return;
+      if (files.length >= MAX_DETECTED_FILES) {
+        scanLimited = true;
+        scanComplete = false;
+        return;
+      }
       if (DEFAULT_IGNORE.has(name)) continue;
       if (name.startsWith(".")) continue;
 
@@ -54,7 +67,9 @@ export function detect(rootPath: string): DetectResult {
       let st;
       try {
         st = statSync(full);
-      } catch {
+      } catch (error) {
+        scanComplete = false;
+        warnings.push(`Unable to inspect ${full}: ${String(error)}`);
         continue;
       }
 
@@ -80,5 +95,8 @@ export function detect(rootPath: string): DetectResult {
     files: files.sort(),
     totalFiles: files.length,
     byExtension,
+    scanComplete,
+    scanLimited,
+    warnings,
   };
 }

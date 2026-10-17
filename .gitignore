@@ -1,4 +1,5 @@
 node_modules/
-graph-out/cache/
+graph-out/
+.pi-subagents/
 *.wasm
 .DS_Store

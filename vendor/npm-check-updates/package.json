@@ -1,0 +1,8 @@
+{
+  "name": "npm-check-updates",
+  "version": "17.1.18",
+  "private": true,
+  "description": "Inert local replacement: the Kotlin grammar declares this unused build-time tool as a production dependency.",
+  "type": "module",
+  "exports": "./index.js"
+}

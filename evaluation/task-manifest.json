@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "pi-mindplace-mp2-07-matched-v1",
+  "description": "Predeclared synthetic matched-task manifest; expected targets and rubrics are hand-authored independently of Mind Place graph output.",
+  "seed": 271828,
+  "repetitions": 3,
+  "timeLimitSeconds": 600,
+  "tasks": [
+    {
+      "id": "small-ts-navigation",
+      "fixture": "evaluation/fixtures/small-ts-shell",
+      "prompt": "Trace how an incoming request reaches the authorization check. Name the handler and authorization implementation, then explain the call path using source evidence.",
+      "expectedTargets": ["src/server.ts:handleRequest", "src/auth.ts:authorize"],
+      "maxScore": 4,
+      "rubric": { "requiredClaims": ["handleRequest delegates to authorize", "authorization rejects missing credentials"], "wrongTargetPenalties": ["confuses authenticateToken with the HTTP handler", "claims an unrelated deployment helper is on the call path"], "scoreScale": "0-4: 1 point per required claim, 1 point for source-grounded path, subtract 1 per material wrong-target claim, floor 0" }
+    },
+    {
+      "id": "small-shell-navigation",
+      "fixture": "evaluation/fixtures/small-ts-shell",
+      "prompt": "Find the deployment entry point and explain which environment variable controls the target environment. Cite the relevant file and behavior.",
+      "expectedTargets": ["scripts/deploy.sh:main", "scripts/deploy.sh:DEPLOY_ENV"],
+      "maxScore": 4,
+      "rubric": { "requiredClaims": ["deploy.sh is the deployment entry point", "DEPLOY_ENV selects the environment with a documented/default value"], "wrongTargetPenalties": ["names the TypeScript server as the deployment entry point"], "scoreScale": "0-4: 1 point per required claim, 1 point for accurate source citation, 1 point for correct default/behavior; subtract wrong-target penalty, floor 0" }
+    },
+    {
+      "id": "large-csharp-navigation",
+      "fixture": "evaluation/fixtures/large-csharp",
+      "prompt": "Trace an order submission from the API endpoint through every routing/handler/policy step, validation, and persistence. Give the ordered caller chain, distinguish similarly named methods in unrelated feature folders, identify the repository interface and concrete implementation, and cite source paths. Do not infer behavior not present in source.",
+      "expectedTargets": ["src/Api/OrdersController.cs:Submit", "src/Application/OrderSubmissionGateway.cs:SubmitAsync", "src/Application/OrderSubmissionHandler.cs:HandleAsync", "src/Application/OrderPolicy.cs:EnsureSubmissionAllowed", "src/Application/OrderService.cs:SubmitAsync", "src/Application/OrderValidator.cs:Validate", "src/Infrastructure/IOrderRepository.cs:SaveAsync", "src/Infrastructure/OrderRepository.cs:SaveAsync"],
+      "maxScore": 6,
+      "rubric": { "requiredClaims": ["controller delegates to OrderSubmissionGateway, which calls OrderSubmissionHandler", "handler applies OrderPolicy before delegating to OrderService", "OrderService validates with OrderValidator before calling IOrderRepository.SaveAsync", "OrderRepository is the concrete IOrderRepository implementation and its SaveAsync is the persistence endpoint"], "wrongTargetPenalties": ["selects a similarly named SubmitAsync/Validate/SaveAsync from Returns, Inventory, Payments, Shipping, Customers, Reporting, or Subscriptions", "claims a payment capture occurs in the order submission chain"], "scoreScale": "0-6: one point each for four required claims, one for full ordered multi-hop chain, one for precise source citations; subtract one per material wrong-target claim, floor 0" }
+    },
+    {
+      "id": "cross-file-callers",
+      "fixture": "evaluation/fixtures/cross-file",
+      "prompt": "Which source files call refreshIndex, and what operation triggers each call? Distinguish the scheduled caller from the administrative caller.",
+      "expectedTargets": ["src/index.ts:refreshIndex", "src/scheduler.ts:runScheduledRefresh", "src/admin.ts:rebuildNow"],
+      "maxScore": 4,
+      "rubric": { "requiredClaims": ["scheduler invokes refreshIndex from runScheduledRefresh", "admin invokes refreshIndex from rebuildNow", "both callers are named with correct trigger"], "wrongTargetPenalties": ["reports a declaration or import as an invocation"], "scoreScale": "0-4: 1 point for each caller/trigger, 1 point for complete citations; subtract 1 for each material false caller, floor 0" }
+    },
+    {
+      "id": "ambiguous-symbols",
+      "fixture": "evaluation/fixtures/ambiguity",
+      "prompt": "There are two functions named findUser. Identify both definitions, describe their distinct responsibilities, and state which one lookupByEmail calls.",
+      "expectedTargets": ["src/users/by-id.ts:findUser", "src/users/by-email.ts:findUser", "src/users/lookup.ts:lookupByEmail"],
+      "maxScore": 5,
+      "rubric": { "requiredClaims": ["by-id definition looks up by identifier", "by-email definition looks up by email", "lookupByEmail calls the email implementation"], "wrongTargetPenalties": ["treats duplicate names as a single unambiguous definition", "assigns lookupByEmail to the by-id implementation"], "scoreScale": "0-5: 1 point per required claim, 1 point for explicitly disambiguating file paths, 1 point for source evidence; subtract 1 per wrong-target claim, floor 0" }
+    },
+    {
+      "id": "implementation-debugging",
+      "fixture": "evaluation/fixtures/debugging",
+      "prompt": "Diagnose why retryWithBackoff can exceed its documented attempt limit. Identify the faulty condition, explain the observed off-by-one behavior, and propose the smallest correction without editing files.",
+      "expectedTargets": ["src/retry.ts:retryWithBackoff", "src/retry.ts:MAX_ATTEMPTS"],
+      "maxScore": 5,
+      "rubric": { "requiredClaims": ["loop condition allows an extra attempt", "attempt counter starts at zero and uses <= MAX_ATTEMPTS", "changing the condition to < MAX_ATTEMPTS fixes the count"], "wrongTargetPenalties": ["attributes the bug to delay calculation", "recommends changing an unrelated timeout constant"], "scoreScale": "0-5: 1 point per required claim, 1 point for a minimal fix, 1 point for accurate citations; subtract 1 per wrong diagnosis, floor 0" }
+    },
+    {
+      "id": "review-diff",
+      "fixture": "evaluation/fixtures/review-diff",
+      "prompt": "Review the supplied patch for correctness risks. Report only the concrete regression introduced, explain a triggering input, and identify the changed line/file.",
+      "expectedTargets": ["src/parseRange.ts:parseRange", "changes.patch:line 8"],
+      "maxScore": 5,
+      "rubric": { "requiredClaims": ["zero lower bound is incorrectly rejected after the change", "input range start=0,end=2 triggers the regression", "regression is in parseRange validation"], "wrongTargetPenalties": ["claims an unrelated formatting-only change is a defect", "reports behavior contradicted by the patch"], "scoreScale": "0-5: 1 point per required claim, 1 point for precise changed-line citation, 1 point for a concrete explanation; subtract 1 per false positive, floor 0" }
+    },
+    {
+      "id": "unsupported-project",
+      "fixture": "evaluation/fixtures/unsupported",
+      "prompt": "Locate the implementation of the data import command and explain its main steps. If the repository does not provide enough supported source to answer, say so rather than inventing an implementation.",
+      "expectedTargets": [],
+      "maxScore": 4,
+      "rubric": { "requiredClaims": ["states that NOTES.rst is prose planning material in an unsupported format, not an implementation", "does not invent a data import implementation", "asks for relevant source or explains the limitation"], "wrongTargetPenalties": ["hallucinates a source file, function, or import behavior"], "scoreScale": "0-4: 1 point per required claim, 1 point for clear uncertainty; any invented implementation caps score at 1" }
+    },
+    {
+      "id": "empty-project",
+      "fixture": "evaluation/fixtures/empty",
+      "prompt": "Find the application's startup function and describe what it initializes. If no source code is present, explicitly report that limitation.",
+      "expectedTargets": [],
+      "maxScore": 3,
+      "rubric": { "requiredClaims": ["reports no source files or startup implementation are present", "does not invent initialization behavior"], "wrongTargetPenalties": ["claims a startup symbol or configuration not in the fixture"], "scoreScale": "0-3: 1 point per required claim, 1 point for appropriate next step; any invented implementation caps score at 1" }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-mindplace.invalid/evaluation/result-v1.schema.json",
+  "title": "MP2-07 run results (raw, before blind scoring)",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "manifestSha256", "fixtureDigest", "harnessSha256", "sourceTreeSha256", "seed", "repetitions", "liveSmoke", "provider", "model", "settings", "environment", "harnessSimulation", "empirical", "decisionEligible", "executionStatus", "usageAccounting", "results", "pairedResults", "scoredAnalysis"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string" },
+    "manifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "fixtureDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "harnessSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sourceTreeSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "seed": { "type": "integer" },
+    "repetitions": { "type": "integer", "minimum": 1 },
+    "liveSmoke": { "type": "boolean" },
+    "provider": { "type": "string" },
+    "model": { "type": "string" },
+    "settings": { "type": "object" },
+    "environment": { "type": "object" },
+    "harnessSimulation": { "type": "boolean" },
+    "empirical": { "type": "boolean" },
+    "decisionEligible": { "type": "boolean" },
+    "executionStatus": { "type": "string" },
+    "usageAccounting": { "type": "object" },
+    "results": { "type": "array", "items": { "$ref": "#/$defs/attempt" } },
+    "pairedResults": { "type": "array", "items": { "type": "object" } },
+    "scoredAnalysis": { "type": ["object", "null"] }
+  },
+  "allOf": [{ "if": { "properties": { "liveSmoke": { "const": true } } }, "then": { "properties": { "repetitions": { "const": 1 }, "decisionEligible": { "const": false } } }, "else": { "properties": { "repetitions": { "minimum": 2 } } } }],
+  "$defs": {
+    "attempt": {
+      "type": "object",
+      "required": ["blindId", "taskId", "repetition", "treatment", "randomizedOrder", "workspaceId", "graphProvisioning", "provider", "model", "answer", "failures", "metrics"],
+      "properties": {
+        "blindId": { "type": "string" }, "taskId": { "type": "string" }, "repetition": { "type": "integer" },
+        "treatment": { "enum": ["graph_optional", "map_only"] }, "randomizedOrder": { "type": "array", "items": { "enum": ["graph_optional", "map_only"] } },
+        "workspaceId": { "type": "string" }, "graphProvisioning": { "enum": ["cold", "reusable"] }, "provider": { "type": "string" }, "model": { "type": "string" },
+        "answer": { "type": "string" }, "failures": { "type": "array", "items": { "type": "string" } },
+        "metrics": {
+          "type": "object", "required": ["usage", "toolCallCounts", "inspectedPaths", "retrievedTargets", "wrongTargetDetours", "measuredAdapterWallMs", "graphBuildWallMs", "chargedGraphBuildMs", "effectiveWallMsIncludingGraphCharge"],
+          "properties": {
+            "usage": { "type": "object", "required": ["inputTokens", "outputTokens", "toolDeclarationTokens", "toolPromptTokens", "sessionWallMs", "toolCalls", "inspectedPaths", "retrievedTargets", "wrongTargetDetours"], "properties": { "inputTokens": { "type": ["number", "null"], "minimum": 0 }, "outputTokens": { "type": ["number", "null"], "minimum": 0 }, "stopReason": { "enum": ["context_budget", "tool_limit", "output_limit", null] }, "toolDeclarationTokens": { "type": ["number", "null"], "minimum": 0 }, "toolPromptTokens": { "type": ["number", "null"], "minimum": 0 }, "sessionWallMs": { "type": "number", "minimum": 0 }, "toolCalls": { "type": "array", "items": { "type": "object", "required": ["name", "durationMs"], "properties": { "name": { "type": "string" }, "durationMs": { "type": ["number", "null"], "minimum": 0 } } } }, "inspectedPaths": { "type": "array", "items": { "type": "string" } }, "retrievedTargets": { "type": "array", "items": { "type": "string" } }, "wrongTargetDetours": { "type": ["integer", "null"], "minimum": 0 }, "measurement": { "type": "string" }, "contextEstimateTokens": { "type": "number", "minimum": 0 }, "contextBudgetKind": { "type": "string" }, "contextBudgetAbort": { "type": "boolean" }, "toolLimitReached": { "type": "boolean" }, "outputLimitReached": { "type": "boolean" }, "maxOutputTokens": { "type": "number", "minimum": 0 } } },
+            "toolCallCounts": { "type": "object", "required": ["ordinary", "graph", "total"] }, "inspectedPaths": { "type": "array", "items": { "type": "string" } },
+            "retrievedTargets": { "type": "array", "items": { "type": "string" } }, "wrongTargetDetours": { "type": ["integer", "null"], "minimum": 0 },
+            "measuredAdapterWallMs": { "type": "number", "minimum": 0 }, "graphBuildWallMs": { "type": "number", "minimum": 0 },
+            "chargedGraphBuildMs": { "type": "number", "minimum": 0 }, "effectiveWallMsIncludingGraphCharge": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+diff --git a/src/parseRange.ts b/src/parseRange.ts
+index 11aa000..22bb000 100644
+--- a/src/parseRange.ts
++++ b/src/parseRange.ts
+@@ -1,4 +1,4 @@
+ export function parseRange(start: number, end: number): [number, number] {
+-  if (start < 0 || end < start) throw new Error("invalid range");
++  if (start <= 0 || end < start) throw new Error("invalid range");
+   return [start, end];
+ }

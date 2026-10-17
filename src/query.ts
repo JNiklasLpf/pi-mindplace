@@ -1,322 +1,201 @@
-/**
- * Token-budget-aware graph query engine.
- *
- * Given a natural-language question, scores every graph node against
- * the query using TF-IDF + cosine similarity, then performs BFS or DFS
- * traversal to build a subgraph that fits within the token budget.
- *
- * Design mirrors graphify/slurp's approach:
- *   1. Tokenize query and node labels (camelCase/snake_case splitting)
- *   2. TF-IDF scoring with smoothed IDF
- *   3. Greedy BFS/DFS from top-scoring nodes, tracking token spend
- *   4. Return subgraph with score breakdown
- */
+/** Token-budgeted lexical graph retrieval. Relevance and PageRank centrality are separate signals. */
 
-import type { GraphNode, GraphEdge, QueryResult } from "./types.ts";
+import type { GraphNode, QueryResult } from "./types.ts";
 import { KnowledgeGraph } from "./graph.ts";
 
-/** Approximate tokens per character — conservative estimate */
 const CHARS_PER_TOKEN = 4;
+export function estimateQueryTokens(text: string): number {
+	return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
 
-/** Tokenize text: split camelCase and snake_case */
 function tokenize(text: string): string[] {
-  const tokens: string[] = [];
-
-  // Split on camelCase boundaries and non-alphanumeric chars
-  const words = text
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
-    .split(/[^a-zA-Z0-9]+/);
-
-  for (const word of words) {
-    const lower = word.toLowerCase();
-    if (lower.length > 1) tokens.push(lower);
-  }
-
-  return tokens;
+	return text
+		.replace(/([a-z])([A-Z])/g, "$1 $2")
+		.replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
+		.split(/[^a-zA-Z0-9]+/)
+		.map(word => word.toLowerCase())
+		.filter(word => word.length > 1);
 }
 
-/** Estimate tokens in a string */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
-}
-
-/** TF-IDF scorer */
 class TfIdfScorer {
-  private idf = new Map<string, number>();
-  private docs: Map<string, string[]> = new Map();
+	private readonly idf = new Map<string, number>();
+	private readonly docs = new Map<string, string[]>();
 
-  constructor(nodes: Map<string, GraphNode>) {
-    // Build document corpus: one doc per node (label + description)
-    let docCount = 0;
-    for (const [id, node] of nodes) {
-      const text = `${node.label} ${node.description ?? ""} ${node.type}`;
-      const tokens = tokenize(text);
-      if (tokens.length > 0) {
-        this.docs.set(id, tokens);
-        docCount++;
-      }
-    }
+	constructor(nodes: Map<string, GraphNode>) {
+		const frequencies = new Map<string, number>();
+		for (const [id, node] of nodes) {
+			const tokens = tokenize(`${node.label} ${node.description ?? ""} ${node.type} ${node.sourceFile}`);
+			if (!tokens.length) continue;
+			this.docs.set(id, tokens);
+			for (const token of new Set(tokens)) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+		}
+		for (const [token, frequency] of frequencies) {
+			this.idf.set(token, Math.log((this.docs.size + 1) / (frequency + 1)) + 1);
+		}
+	}
 
-    // Compute document frequencies
-    const df = new Map<string, number>();
-    for (const tokens of this.docs.values()) {
-      const seen = new Set<string>();
-      for (const t of tokens) {
-        if (!seen.has(t)) {
-          seen.add(t);
-          df.set(t, (df.get(t) || 0) + 1);
-        }
-      }
-    }
-
-    // Compute IDF: log((N + 1) / (df + 1)) + 1 (smoothing like scikit-learn)
-    for (const [term, freq] of df) {
-      this.idf.set(term, Math.log((docCount + 1) / (freq + 1)) + 1);
-    }
-  }
-
-  /** Score a node against query tokens. Returns 0..1 */
-  score(nodeId: string, queryTokens: string[]): number {
-    const docTokens = this.docs.get(nodeId);
-    if (!docTokens || docTokens.length === 0 || queryTokens.length === 0) return 0;
-
-    // Compute TF vector for the document
-    const tf = new Map<string, number>();
-    for (const t of docTokens) {
-      tf.set(t, (tf.get(t) || 0) + 1);
-    }
-
-    // Substring matching for compound words like "authenticateUser"
-    let substringBonus = 0;
-    const label = docTokens.join(' ');
-    for (const qt of queryTokens) {
-      if (label.includes(qt)) substringBonus += 0.3;
-    }
-
-    // Cosine similarity between query and document vectors
-    let dotProduct = 0;
-    let queryNorm = 0;
-    let docNorm = 0;
-
-    // Query vector: all query tokens with weight 1 * IDF
-    const queryWeights = new Map<string, number>();
-    for (const t of queryTokens) {
-      const idf = this.idf.get(t) ?? 0.5;
-      queryWeights.set(t, idf);
-      queryNorm += idf * idf;
-    }
-    queryNorm = Math.sqrt(queryNorm);
-    if (queryNorm === 0) return 0;
-
-    // Doc vector: TF * IDF
-    const docWeights = new Map<string, number>();
-    for (const [t, freq] of tf) {
-      const idf = this.idf.get(t) ?? 0.5;
-      const weight = freq * idf;
-      docWeights.set(t, weight);
-      docNorm += weight * weight;
-
-      if (queryWeights.has(t)) {
-        dotProduct += queryWeights.get(t)! * weight;
-      }
-    }
-    docNorm = Math.sqrt(docNorm);
-    if (docNorm === 0) return 0;
-
-    const cosine = dotProduct / (queryNorm * docNorm);
-    return Math.min(1, cosine + substringBonus);
-  }
+	score(node: GraphNode, queryTokens: string[], question: string): number {
+		const tokens = this.docs.get(node.id);
+		if (!tokens?.length || !queryTokens.length) return 0;
+		const termCounts = new Map<string, number>();
+		for (const token of tokens) termCounts.set(token, (termCounts.get(token) ?? 0) + 1);
+		let dot = 0;
+		let queryNorm = 0;
+		let docNorm = 0;
+		for (const token of queryTokens) {
+			const weight = this.idf.get(token) ?? 0.5;
+			queryNorm += weight * weight;
+			if (termCounts.has(token)) dot += weight * (termCounts.get(token)! * weight);
+		}
+		for (const [token, count] of termCounts) {
+			const weight = count * (this.idf.get(token) ?? 0.5);
+			docNorm += weight * weight;
+		}
+		let score = queryNorm && docNorm ? dot / Math.sqrt(queryNorm * docNorm) : 0;
+		const label = node.label.toLowerCase();
+		const normalizedQuestion = question.toLowerCase().trim();
+		if (normalizedQuestion && label === normalizedQuestion) score += 0.65;
+		else if (normalizedQuestion.length > 2 && label.includes(normalizedQuestion)) score += 0.3;
+		for (const token of queryTokens) if (label.includes(token)) score += 0.12;
+		const file = node.sourceFile.toLowerCase();
+		if (node.type === "attribute" && !queryTokens.some(t => t === "attribute" || t === "attributes")) score *= 0.45;
+		if (/(^|[/.])(__tests__|tests?)([/.]|$)|\.(test|spec)\./.test(file) && !queryTokens.some(t => ["test", "tests", "spec", "fixture"].includes(t))) score *= 0.55;
+		return Math.min(1, score);
+	}
 }
 
-/** Format a single node as markdown */
-function formatNode(node: GraphNode, includeDescription: boolean = true): string {
-  let text = `### ${node.label} (${node.type})`;
-  if (node.sourceLocation) text += ` · score: ${(node.centrality ?? 0).toFixed(2)}`;
-  if (includeDescription && node.description) {
-    text += `\n${node.description}`;
-  }
-  text += `\n→ File: ${node.sourceFile}`;
-  if (node.sourceLocation) text += ` ${node.sourceLocation}`;
-  return text;
+function formatNode(node: GraphNode, relevance: number, matched: boolean): string {
+	let text = `#### ${node.label} (${node.type})`;
+	text += matched ? ` · relevance: ${relevance.toFixed(2)}` : " · connected context";
+	if (node.description) text += `\n${node.description}`;
+	text += `\nFile: ${node.sourceFile}`;
+	if (node.sourceLocation) text += ` ${node.sourceLocation}`;
+	return text;
 }
 
-/**
- * Query the knowledge graph.
- *
- * @param kg The knowledge graph
- * @param question Natural-language question
- * @param budget Token budget for the result
- * @param mode "bfs" (broad context) or "dfs" (trace a specific path)
- * @param minScore Minimum relevance score (0..1)
- */
 export function query(
-  kg: KnowledgeGraph,
-  question: string,
-  budget: number = 4000,
-  mode: "bfs" | "dfs" = "bfs",
-  minScore: number = 0.15,
+	kg: KnowledgeGraph,
+	question: string,
+	requestedBudget = 4000,
+	mode: "bfs" | "dfs" = "bfs",
+	minScore = 0.15,
+	scope?: string,
 ): QueryResult {
-  if (kg.nodes.size === 0) {
-    return { question, mode, nodes: [], edges: [], tokensUsed: 0, budget, coverage: 0 };
-  }
+	if (!Number.isFinite(requestedBudget) || requestedBudget <= 0) throw new RangeError("budget must be a finite positive number of tokens");
+	if (!Number.isFinite(minScore) || minScore < 0 || minScore > 1) throw new RangeError("minScore must be between 0 and 1");
+	// The smallest useful response is 64 estimated tokens (including its heading/status).
+	const budget = Math.max(160, Math.floor(requestedBudget));
+	if (!kg.nodes.size) {
+		const empty: QueryResult = { question, mode, nodes: [], edges: [], tokensUsed: 0, budget, coverage: 0, scope };
+		for (let i = 0; i < 3; i++) empty.tokensUsed = estimateQueryTokens(formatQueryResult(empty));
+		return empty;
+	}
 
-  const queryTokens = tokenize(question);
-  const scorer = new TfIdfScorer(kg.nodes);
+	const queryTokens = tokenize(question);
+	const scorer = new TfIdfScorer(kg.nodes);
+	const scored = new Map<string, number>();
+	for (const node of kg.nodes.values()) {
+		const score = scorer.score(node, queryTokens, question);
+		if (score >= minScore && score > 0) scored.set(node.id, score);
+	}
+	const ranked = [...scored.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+	const candidates: string[] = [];
+	const candidateSet = new Set<string>();
+	const addCandidate = (id: string) => {
+		if (!candidateSet.has(id)) { candidateSet.add(id); candidates.push(id); }
+	};
+	if (mode === "dfs" && ranked.length) {
+		const walk = (id: string, depth: number) => {
+			if (depth > 5 || candidateSet.has(id)) return;
+			addCandidate(id);
+			const neighbors = [...(kg.adjacency.get(id) ?? [])]
+				.sort((a, b) => (scored.get(b) ?? 0) - (scored.get(a) ?? 0));
+			for (const neighbor of neighbors.slice(0, 3)) walk(neighbor, depth + 1);
+		};
+		walk(ranked[0][0], 0);
+	} else {
+		for (const [id] of ranked) {
+			addCandidate(id);
+			for (const neighbor of kg.adjacency.get(id) ?? []) {
+				if ((scored.get(neighbor) ?? 0) >= minScore * 0.5) addCandidate(neighbor);
+			}
+		}
+	}
 
-  // Score all nodes
-  const scored = new Map<string, number>();
-  for (const nodeId of kg.nodes.keys()) {
-    const s = scorer.score(nodeId, queryTokens);
-    if (s >= minScore) {
-      scored.set(nodeId, s);
-    }
-  }
+	const selected: GraphNode[] = [];
+	const selectedIds = new Set<string>();
+	let truncated = candidates.length > 500;
+	for (const id of candidates.slice(0, 500)) {
+		const node = kg.nodes.get(id);
+		if (!node) continue;
+		selected.push(node);
+		selectedIds.add(id);
+	}
 
-  // Sort by score descending
-  const ranked = [...scored.entries()].sort((a, b) => b[1] - a[1]);
-
-  // Greedy subgraph selection with token budget
-  const selectedNodes = new Set<string>();
-  const selectedEdges: GraphEdge[] = [];
-  let tokensUsed = 0;
-
-  // Header tokens
-  tokensUsed += estimateTokens(
-    `## Mind Place Query: "${question}" (budget: ${budget} tokens)\n\n`,
-  );
-
-  const queue: string[] = [];
-
-  if (mode === "bfs") {
-    // Start from top-scored nodes
-    for (const [nodeId] of ranked) {
-      if (tokensUsed >= budget * 0.9) break;
-      addNodeToResult(nodeId, ranked.find(([id]) => id === nodeId)?.[1] ?? 0);
-      // Also add neighbors
-      const neighbors = kg.adjacency.get(nodeId);
-      if (neighbors) {
-        for (const neighborId of neighbors) {
-          if (!selectedNodes.has(neighborId) && tokensUsed < budget * 0.9) {
-            const neighborScore = scored.get(neighborId) ?? 0;
-            if (neighborScore >= minScore * 0.5) {
-              addNodeToResult(neighborId, neighborScore);
-            }
-          }
-        }
-      }
-    }
-  } else {
-    // DFS: follow the top-scored path deeply
-    const visited = new Set<string>();
-    function dfs(currentId: string, depth: number): void {
-      if (depth > 5 || tokensUsed >= budget * 0.9) return;
-      visited.add(currentId);
-      addNodeToResult(currentId, scored.get(currentId) ?? 0);
-
-      const neighbors = [...(kg.adjacency.get(currentId) ?? [])]
-        .filter(n => !visited.has(n))
-        .sort((a, b) => (scored.get(b) ?? 0) - (scored.get(a) ?? 0));
-
-      for (const neighborId of neighbors.slice(0, 3)) {
-        if (!visited.has(neighborId)) {
-          dfs(neighborId, depth + 1);
-        }
-      }
-    }
-
-    if (ranked.length > 0) {
-      dfs(ranked[0][0], 0);
-    }
-  }
-
-  function addNodeToResult(nodeId: string, score: number): void {
-    if (selectedNodes.has(nodeId)) return;
-    const node = kg.nodes.get(nodeId);
-    if (!node) return;
-
-    const formatted = formatNode(node, true);
-    const nodeTokens = estimateTokens(formatted + "\n\n");
-    if (tokensUsed + nodeTokens > budget * 0.95) return;
-
-    selectedNodes.add(nodeId);
-    tokensUsed += nodeTokens;
-  }
-
-  // Add edges between selected nodes
-  for (const edge of kg.edges) {
-    if (selectedNodes.has(edge.source) && selectedNodes.has(edge.target)) {
-      if (!selectedEdges.some(e =>
-        (e.source === edge.source && e.target === edge.target) ||
-        (e.source === edge.target && e.target === edge.source),
-      )) {
-        selectedEdges.push(edge);
-      }
-    }
-  }
-
-  const resultNodes = [...selectedNodes].map(id => kg.nodes.get(id)!).filter(Boolean);
-
-  return {
-    question,
-    mode,
-    nodes: resultNodes,
-    edges: selectedEdges,
-    tokensUsed,
-    budget,
-    coverage: kg.nodes.size > 0 ? selectedNodes.size / kg.nodes.size : 0,
-  };
+	let result = makeResult(selected, selectedIds, scored, question, mode, budget, kg.nodes.size, truncated, kg, scope);
+	while (result.nodes.length && estimateQueryTokens(formatQueryResult(result)) > budget) {
+		const removed = result.nodes.pop()!;
+		selectedIds.delete(removed.id);
+		result.edges = result.edges.filter(edge => selectedIds.has(edge.source) && selectedIds.has(edge.target));
+		delete result.relevanceByNode?.[removed.id];
+		result.coverage = result.nodes.length / kg.nodes.size;
+		result.truncated = true;
+	}
+	for (let i = 0; i < 3; i++) {
+		result.tokensUsed = estimateQueryTokens(formatQueryResult(result));
+	}
+	while (result.nodes.length && estimateQueryTokens(formatQueryResult(result)) > budget) {
+		const removed = result.nodes.pop()!;
+		selectedIds.delete(removed.id);
+		result.edges = result.edges.filter(edge => selectedIds.has(edge.source) && selectedIds.has(edge.target));
+		if (result.relevanceByNode) delete result.relevanceByNode[removed.id];
+		result.coverage = result.nodes.length / kg.nodes.size;
+		result.truncated = true;
+		result.tokensUsed = estimateQueryTokens(formatQueryResult(result));
+	}
+	return result;
 }
 
-/** Format query result as markdown for the LLM */
+function makeResult(
+	nodes: GraphNode[], ids: Set<string>, scores: Map<string, number>, question: string,
+	mode: "bfs" | "dfs", budget: number, total: number, truncated: boolean, kg: KnowledgeGraph, scope?: string,
+): QueryResult {
+	const edges = [...new Map(kg.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)).map(edge => [`${edge.source}:${edge.relation}:${edge.target}`, edge])).values()];
+	const relevanceByNode: Record<string, number> = {};
+	for (const node of nodes) if (scores.has(node.id)) relevanceByNode[node.id] = scores.get(node.id)!;
+	return { question, mode, nodes: [...nodes], edges, tokensUsed: 0, budget, coverage: total ? nodes.length / total : 0, relevanceByNode, scope, truncated };
+}
+
 export function formatQueryResult(result: QueryResult): string {
-  const lines: string[] = [];
-
-  lines.push(`## Mind Place: "${result.question}"`);
-  lines.push(`_${result.nodes.length} nodes · ${result.tokensUsed}/${result.budget} tokens (${(result.coverage * 100).toFixed(1)}% coverage)_`);
-  lines.push("");
-
-  // Group nodes by type
-  const byType = new Map<string, GraphNode[]>();
-  for (const node of result.nodes) {
-    const group = byType.get(node.type) ?? [];
-    group.push(node);
-    byType.set(node.type, group);
-  }
-
-  for (const [type, nodes] of byType) {
-    if (type === "file") continue; // skip file nodes in output
-    lines.push(`### ${type.charAt(0).toUpperCase() + type.slice(1)}s`);
-    for (const node of nodes) {
-      lines.push(formatNode(node, false));
-      lines.push("");
-    }
-  }
-
-  // Key relationships
-  if (result.edges.length > 0) {
-    lines.push("### Key Relationships");
-    const shown = new Set<string>();
-    for (const edge of result.edges.slice(0, 10)) {
-      const srcNode = result.nodes.find(n => n.id === edge.source);
-      const tgtNode = result.nodes.find(n => n.id === edge.target);
-      if (srcNode && tgtNode) {
-        const key = `${edge.source}→${edge.target}`;
-        if (!shown.has(key)) {
-          shown.add(key);
-          lines.push(`- ${srcNode.label} → **${edge.relation}** → ${tgtNode.label}${edge.confidence === "INFERRED" ? " _[inferred]_" : ""}`);
-        }
-      }
-    }
-  }
-
-  // Remaining nodes hint
-  const totalNodes = result.nodes.length;
-  if (totalNodes > 0 && result.coverage < 1) {
-    lines.push("");
-    lines.push(`---`);
-    lines.push(`💡 ${totalNodes} additional connected nodes available — increase budget to include them`);
-  }
-
-  return lines.join("\n");
+	const lines: string[] = [];
+	const displayQuestion = result.question.length > 100 ? `${result.question.slice(0, 97)}…` : result.question;
+	lines.push(`## Mind Place: "${displayQuestion}"`);
+	lines.push(`_${result.nodes.length} nodes · estimated ${result.tokensUsed}/${result.budget} tokens · graph coverage ${(result.coverage * 100).toFixed(1)}%_`);
+	if (result.scope) lines.push(`Graph: ${result.scope.length > 120 ? `${result.scope.slice(0, 117)}…` : result.scope}`);
+	if (!result.nodes.length) lines.push(result.truncated ? "No entity fit within the requested budget." : "No useful graph match found; try a symbol name or use source search/read directly.");
+	const byType = new Map<string, GraphNode[]>();
+	for (const node of result.nodes) {
+		const group = byType.get(node.type) ?? [];
+		group.push(node);
+		byType.set(node.type, group);
+	}
+	for (const [type, nodes] of byType) {
+		lines.push(`### ${type === "file" ? "Files" : `${type.charAt(0).toUpperCase()}${type.slice(1)}s`}`);
+		for (const node of nodes) {
+			const relevance = result.relevanceByNode?.[node.id] ?? 0;
+			lines.push(formatNode(node, relevance, relevance > 0));
+			lines.push("");
+		}
+	}
+	if (result.edges.length) {
+		lines.push("### Key Relationships");
+		for (const edge of result.edges.slice(0, 10)) {
+			const source = result.nodes.find(node => node.id === edge.source);
+			const target = result.nodes.find(node => node.id === edge.target);
+			if (source && target) lines.push(`- ${source.label} —${edge.relation}→ ${target.label}${edge.confidence === "INFERRED" ? " (inferred)" : ""}`);
+		}
+		if (result.edges.length > 10) lines.push(`_${result.edges.length - 10} additional relationships omitted._`);
+	}
+	if (result.truncated) lines.push("_Truncated to fit the estimated character-based budget; increase budget for more._");
+	return lines.join("\n");
 }
