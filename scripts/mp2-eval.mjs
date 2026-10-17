@@ -7,6 +7,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { cpus, release, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadGraphApi, pinnedSdkProvenance, provisionGraph } from "./mp2-pi-sdk-adapter.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = resolve(SCRIPT_DIR, "..");
@@ -61,10 +62,11 @@ export function evaluationSourceDigest(packageRoot = PACKAGE_ROOT) {
   return sha256(JSON.stringify(rows));
 }
 function assert(condition, message) { if (!condition) throw new Error(message); }
-function validateManifest(manifest) {
+function validateManifest(manifest, { allowSmoke = false } = {}) {
   assert(manifest?.schemaVersion === 1 && Array.isArray(manifest.tasks) && manifest.tasks.length > 0, "Unsupported or empty task manifest.");
   assert(Number.isSafeInteger(manifest.seed) && manifest.seed >= 0, "Manifest seed must be a nonnegative integer.");
-  assert(Number.isSafeInteger(manifest.repetitions) && manifest.repetitions >= 2, "Manifest repetitions must be at least two.");
+  if (manifest.liveSmoke === true) assert(allowSmoke && manifest.decisionEligible === false && manifest.manifestId === "mp2-live-smoke-v1" && manifest.tasks.length === 1 && manifest.repetitions === 1, "liveSmoke manifests must be exactly mp2-live-smoke-v1, decision-ineligible, one task, one repetition.");
+  else assert(Number.isSafeInteger(manifest.repetitions) && manifest.repetitions >= 2, "Full evaluation repetitions must be at least two; only the explicitly labeled one-task LIVE SMOKE manifest may use one.");
   const ids = new Set();
   for (const task of manifest.tasks) {
     assert(typeof task.id === "string" && !ids.has(task.id), `Task IDs must be unique: ${task.id}`); ids.add(task.id);
@@ -86,8 +88,10 @@ function validateAdapterMetrics(output, approval, treatment) {
   assert(output.adapterVersion === approval.adapterVersion && output.settings !== undefined && canonicalJson(output.settings) === canonicalJson(approval.settings), "Adapter must echo the approved adapterVersion and settings; reported settings differ from the approval.");
   assert(typeof output.answer === "string", "Adapter response must include the answer text for blinded scoring.");
   const usage = output.usage;
-  assert(usage && ["inputTokens", "outputTokens", "sessionWallMs"].every(key => Number.isFinite(usage[key]) && usage[key] >= 0) && ["toolDeclarationTokens", "toolPromptTokens"].every(key => usage[key] === null || (Number.isFinite(usage[key]) && usage[key] >= 0)), "Adapter must report nonnegative Pi-normalized input/output and session time; unmeasurable token splits must be null.");
-  assert(usage.inputTokens >= 0 && usage.outputTokens <= approval.settings.maxOutputTokens && usage.maxOutputTokens === approval.settings.maxOutputTokens, "Adapter output usage exceeds the approved output cap.");
+  assert(usage && Number.isFinite(usage.sessionWallMs) && usage.sessionWallMs >= 0 && ["inputTokens", "outputTokens", "toolDeclarationTokens", "toolPromptTokens"].every(key => usage[key] === null || (Number.isFinite(usage[key]) && usage[key] >= 0)), "Adapter must report nonnegative session time; unavailable usage and unmeasurable token splits must be null, never fabricated zero.");
+  assert((usage.inputTokens === null) === (usage.outputTokens === null), "Input/output usage availability must be consistent.");
+  assert((usage.outputTokens === null || usage.outputTokens <= approval.settings.maxOutputTokens) && usage.maxOutputTokens === approval.settings.maxOutputTokens, "Adapter output usage exceeds the approved output cap.");
+  for (const flag of ["contextBudgetAbort", "toolLimitReached", "outputLimitReached"]) assert(usage[flag] === undefined || typeof usage[flag] === "boolean", `Adapter flag ${flag} must be boolean.`);
   assert(Array.isArray(usage.toolCalls) && Array.isArray(usage.inspectedPaths) && Array.isArray(usage.retrievedTargets), "Adapter must report tool calls, inspected paths, and retrieved targets.");
   assert(usage.wrongTargetDetours === null || (Number.isSafeInteger(usage.wrongTargetDetours) && usage.wrongTargetDetours >= 0), "wrongTargetDetours must be null unless independently measurable.");
   const permitted = new Set([...ORDINARY_TOOLS, ...(treatment === "graph_optional" ? GRAPH_TOOLS : [])]);
@@ -107,17 +111,10 @@ function taskWorkOrder(manifest) {
 // Random per-row blind IDs: a deterministic hash of public run/task/repetition/treatment was reversible by any scorer.
 function makeBlindId() { return randomBytes(12).toString("hex"); }
 
-async function buildGraph(root, outputDirectory = join(root, "graph-out")) {
-  const [{ extract }, { detect }, { KnowledgeGraph }, { makeGraphMetadata }, { mkdirSync: fsMkdirSync }] = await Promise.all([
-    import("../src/extract.ts"), import("../src/detect.ts"), import("../src/graph.ts"), import("../src/graph-file.ts"), import("node:fs"),
-  ]);
-  const detected = detect(root);
-  const extracted = extract(root, detected.files, undefined, true);
-  const graph = KnowledgeGraph.fromExtraction(extracted);
-  const metadata = makeGraphMetadata(root, detected);
-  if (!metadata.scanComplete) throw new Error(`Graph build inventory incomplete for ${root}`);
-  const output = outputDirectory; fsMkdirSync(output, { recursive: true });
-  writeFileSync(join(output, "graph.json"), JSON.stringify({ ...graph.toJSON(), mindplace: metadata }, null, 2));
+/** Provision through the actual production mindplace_build tool inside a disposable fixture workspace (graph-out/.gitignore side effects recorded). */
+async function buildGraph(root) {
+  const run = await provisionGraph(await loadGraphApi(), root, { force: true });
+  return { status: run.status, sideEffects: run.sideEffects, wallMs: run.wallMs };
 }
 function rebaseGraphMetadata(path, workspace) {
   const graph = JSON.parse(readFileSync(path, "utf8"));
@@ -129,7 +126,7 @@ function copyFixture(task, workspace, packageRoot) {
   assert(source.startsWith(resolve(packageRoot) + sep), `Fixture path escapes package root: ${task.fixture}`);
   cpSync(source, workspace, { recursive: true, errorOnExist: false, force: true });
 }
-function makeAdapterRequest({ runId, task, repetition, treatment, workspace, isolation, approval, provisioning, graphBuild, timeoutSeconds, graphPath }) {
+function makeAdapterRequest({ runId, task, repetition, treatment, workspace, isolation, approval, provisioning, graphBuild, timeoutSeconds }) {
   const graphAvailable = treatment === "graph_optional";
   return {
     protocol: "pi-mindplace-mp2-adapter-v1", runId, taskId: task.id, repetition, taskText: task.prompt,
@@ -137,7 +134,7 @@ function makeAdapterRequest({ runId, task, repetition, treatment, workspace, iso
     settings: approval.settings, context: { repositoryMap: readFileSync(join(workspace, "README.md"), "utf8") },
     isolation,
     tools: { ordinary: ORDINARY_TOOLS, graph: graphAvailable ? GRAPH_TOOLS : [], graphUseRequired: false },
-    graph: { available: graphAvailable, provisioning, graphPath: graphAvailable ? graphPath : null, buildWallMs: graphBuild.buildWallMs, chargedBuildMs: graphBuild.chargedBuildMs, reusableAcrossSessions: provisioning === "reusable" },
+    graph: { available: graphAvailable, provisioning, productionBuildStatus: graphBuild.status ?? null, productionBuildSideEffects: graphBuild.sideEffects ?? null, buildWallMs: graphBuild.buildWallMs, chargedBuildMs: graphBuild.chargedBuildMs, reusableAcrossSessions: provisioning === "reusable" },
     reporting: { requirePiNormalizedUsage: true, requireToolEvents: true, requireInspectedPaths: true, targetAndDetourClassification: "harness/scorer only; never disclosed to adapter" },
   };
 }
@@ -145,7 +142,7 @@ function writeJson(path, value) { mkdirSync(dirname(path), { recursive: true });
 
 /** Preflight verifies the complete approval tuple. It never creates/spawns the adapter. */
 export function verifyApproval({ manifestBytes, manifest, packageRoot = PACKAGE_ROOT, approval, adapterCommand, adapterArgs }) {
-  validateManifest(manifest);
+  validateManifest(manifest, { allowSmoke: true });
   assert(manifest.timeLimitSeconds === APPROVED_SETTINGS.timeLimitSeconds, "Manifest time limit differs from the frozen approval setting.");
   assert(approval && approval.schemaVersion === 1 && approval.approved === true && typeof approval.approvedBy === "string" && approval.approvedBy.trim(), "Missing explicit approval artifact (schemaVersion 1, approved, approvedBy required). No adapter launch is authorized.");
   assert(approval.manifestSha256 === sha256(manifestBytes), "Approval manifest hash mismatch. No adapter launch is authorized.");
@@ -153,14 +150,17 @@ export function verifyApproval({ manifestBytes, manifest, packageRoot = PACKAGE_
   const fixtures = fixtureDigest(manifest, packageRoot);
   assert(approval.fixtureDigest === fixtures, "Approval fixture digest mismatch. No adapter launch is authorized.");
   assert(approval.repetitions === manifest.repetitions, "Approved repetitions differ from the manifest.");
+  assert(approval.liveSmoke === (manifest.liveSmoke === true), "Approval LIVE SMOKE designation differs from the manifest.");
   const actualEnvironment = environmentFingerprint();
   assert(approval.environment && Object.keys(actualEnvironment).every(key => approval.environment[key] === actualEnvironment[key]) && Object.keys(approval.environment).length === Object.keys(actualEnvironment).length, "Approved environment differs from this runtime.");
   const expectedRubricHash = sha256(JSON.stringify(manifest.tasks.map(task => ({ id: task.id, expectedTargets: task.expectedTargets, maxScore: task.maxScore, rubric: task.rubric }))));
   assert(approval.rubricSha256 === expectedRubricHash, "Approval rubric hash mismatch.");
   assert(approval.provider === TARGET_PROVIDER && approval.model === TARGET_MODEL && canonicalJson(approval.settings) === canonicalJson(APPROVED_SETTINGS) && typeof approval.adapterId === "string" && approval.adapterId === "pi-mindplace-mp2-pi-sdk-luna" && approval.adapterVersion === "mp2-pi-sdk-luna-1.0.0" && approval.piSdkVersion === "1.2.0", "Approval must pin github-copilot/gpt-6-luna, the adapter version, Pi SDK 1.2.0, and only supported frozen settings.");
   assert(approval.sourceTreeSha256 === evaluationSourceDigest(packageRoot), "Evaluation source-tree digest mismatch. No adapter launch is authorized.");
+  assert(approval.piSdkIntegrity === pinnedSdkProvenance(packageRoot).integrity, "Approval Pi SDK lock integrity differs from the declared pinned dependency. No adapter launch is authorized.");
   assert(approval.adapterCommand === adapterCommand && JSON.stringify(approval.adapterArgs) === JSON.stringify(adapterArgs), "Adapter command differs from the explicitly approved command.");
   assert(typeof approval.adapterEntry === "string" && adapterArgs.includes(approval.adapterEntry) && /^[0-9a-f]{64}$/.test(approval.adapterEntrySha256 ?? ""), "Approval must pin the adapter entry file (one of the frozen adapter arguments) and its SHA-256.");
+  assert(isAbsolute(approval.adapterEntry), "Approved adapterEntry must be an absolute path (the adapter runs with the fixture workspace as cwd).");
   let entryBytes; try { entryBytes = readFileSync(resolve(approval.adapterEntry)); } catch { throw new Error("Approved adapter entry file is unreadable. No adapter launch is authorized."); }
   assert(sha256(entryBytes) === approval.adapterEntrySha256, "Adapter entry file hash mismatch. No adapter launch is authorized.");
   assert(typeof approval.approvedAt === "string" && !Number.isNaN(Date.parse(approval.approvedAt)), "Approval must record approvedAt.");
@@ -178,12 +178,11 @@ function aggregatePairs(rows) {
 function packageRunResult({ manifest, manifestHash, fixtureHash, approval, runId, rows, synthetic }) {
   return {
     schemaVersion: 1, runId, createdAt: new Date().toISOString(), manifestId: manifest.manifestId,
-    manifestSha256: manifestHash, fixtureDigest: fixtureHash, harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(), seed: manifest.seed, repetitions: manifest.repetitions,
+    manifestSha256: manifestHash, fixtureDigest: fixtureHash, harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(), seed: manifest.seed, repetitions: manifest.repetitions, liveSmoke: manifest.liveSmoke === true,
     provider: approval.provider, model: approval.model, settings: approval.settings, environment: environmentFingerprint(),
     harnessSimulation: synthetic, empirical: !synthetic, decisionEligible: false,
     executionStatus: synthetic ? "HARNESS_SIMULATION_NOT_EMPIRICAL" : "UNSCORED_AWAITING_BLIND_REVIEW",
     usageAccounting: { inputOutputTokens: "Pi-normalized assistant-message usage; provider-returned provenance is not independently attested and missing tool-declaration/prompt splits are null", toolDeclarationAndPromptTokens: "not separately measurable with the documented SDK session API; null, not zero", toolCalls: "Pi tool execution events; durations from SDK events when present, otherwise null", contextBudget: "hard 16000 Pi estimator-token pre-request guard; approximate tokenizer estimate, not exact provider tokenization or billing", outputBudget: "2048 total returned-output-token guard and per-request maxTokens cap via exact Luna model metadata; provider enforcement is not separately attested", toolLimits: "SDK beforeToolCall gate: at most 32 ordinary and 16 graph calls per invocation; the next call is blocked and aborts", wrongTargetDetours: "not independently derivable without leaking rubric targets to the adapter; null", wallTime: "parent-measured adapter-process elapsed milliseconds; hard-killed at 600 seconds", graphBuild: "cold build is charged; reusable build time amortized across the predeclared graph sessions using that fixture; raw build time retained" },
-    sourceTreeSha256: evaluationSourceDigest(),
     results: rows, pairedResults: aggregatePairs(rows), scoredAnalysis: null,
   };
 }
@@ -219,6 +218,11 @@ export function analyzeScoredResults(results, scoreSheet, scoringKey) {
   assert(scores.size === results.results.length, "Every result must have exactly one independent score.");
   const grouped = new Map();
   for (const row of results.results) { const list = grouped.get(row.taskId) ?? []; list.push(row); grouped.set(row.taskId, list); }
+  for (const row of results.results) {
+    assert(Array.isArray(row.failures) && row.failures.length === 0, `Analysis refuses failed attempt ${row.blindId}: ${(row.failures ?? []).join("; ")}`);
+    const u = row.metrics?.usage;
+    assert(u && [u.inputTokens, u.outputTokens, u.sessionWallMs, row.metrics.effectiveWallMsIncludingGraphCharge, row.metrics.toolCallCounts?.ordinary, row.metrics.toolCallCounts?.graph].every(v => Number.isFinite(v)), `Analysis refuses null/missing metrics for ${row.blindId}.`);
+  }
   const metricNames = ["score", "normalizedScore0to5", "inputTokens", "outputTokens", "sessionWallMs", "ordinaryToolCalls", "graphToolCalls", "effectiveWallMsIncludingGraphCharge"];
   const rowMetric = (row, metric) => metric === "score" ? scores.get(row.blindId).score
     : metric === "normalizedScore0to5" ? scores.get(row.blindId).score * 5 / scores.get(row.blindId).maxScore
@@ -265,7 +269,7 @@ function validateResultArtifact(result, scoreSheet, scoringKey) {
 }
 
 async function runCore({ manifestPath = DEFAULT_MANIFEST, outputDirectory, packageRoot = PACKAGE_ROOT, synthetic = false, adapterCommand, adapterArgs = [], approval }) {
-  const manifestBytes = readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes.toString("utf8")); validateManifest(manifest);
+  const manifestBytes = readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes.toString("utf8")); validateManifest(manifest, { allowSmoke: true });
   const manifestHash = sha256(manifestBytes); const fixtureHash = fixtureDigest(manifest, packageRoot);
   if (!synthetic) verifyApproval({ manifestBytes, manifest, packageRoot, approval, adapterCommand, adapterArgs });
   const tempRoot = mkdtempSync(join(tmpdir(), synthetic ? "mp2-smoke-" : "mp2-run-"));
@@ -277,29 +281,33 @@ async function runCore({ manifestPath = DEFAULT_MANIFEST, outputDirectory, packa
     for (const fixture of fixtureCounts.keys()) {
       const stage = join(tempRoot, "reusable-stage", sha256(fixture).slice(0, 10)); mkdirSync(stage, { recursive: true });
       const task = manifest.tasks.find(item => item.fixture === fixture); copyFixture(task, stage, packageRoot);
-      const start = performance.now(); await buildGraph(stage); const buildWallMs = performance.now() - start;
-      reusableStages.set(fixture, { path: stage, buildWallMs, reuseCount: fixtureCounts.get(fixture) * (manifest.repetitions - 1) });
+      const start = performance.now(); const stageBuild = await buildGraph(stage); const buildWallMs = performance.now() - start;
+      reusableStages.set(fixture, { path: stage, buildWallMs, status: stageBuild.status, sideEffects: stageBuild.sideEffects, reuseCount: fixtureCounts.get(fixture) * (manifest.repetitions - 1) });
     }
     for (const item of work) {
       const order = shuffle(TREATMENTS, random);
       for (const treatment of order) {
-        const sessionId = `${item.task.id}-r${item.repetition}-${treatment}`; const workspace = join(tempRoot, "sessions", sessionId); const graphDir = join(tempRoot, "graphs", sessionId); mkdirSync(dirname(workspace), { recursive: true }); copyFixture(item.task, workspace, packageRoot);
-        let graphBuild = { buildWallMs: 0, chargedBuildMs: 0 };
+        const sessionId = `${item.task.id}-r${item.repetition}-${treatment}`; const workspace = join(tempRoot, "sessions", sessionId); mkdirSync(dirname(workspace), { recursive: true }); copyFixture(item.task, workspace, packageRoot);
+        let graphBuild = { buildWallMs: 0, chargedBuildMs: 0, status: null, sideEffects: null };
         if (treatment === "graph_optional") {
           if (item.graphProvisioning === "cold") {
-            const started = performance.now(); await buildGraph(workspace, graphDir); graphBuild.buildWallMs = performance.now() - started; graphBuild.chargedBuildMs = graphBuild.buildWallMs;
+            const started = performance.now(); const built = await buildGraph(workspace); graphBuild.buildWallMs = performance.now() - started; graphBuild.chargedBuildMs = graphBuild.buildWallMs; graphBuild.status = built.status; graphBuild.sideEffects = built.sideEffects;
           } else {
-            const stage = reusableStages.get(item.task.fixture); mkdirSync(join(tempRoot, "graphs"), { recursive: true }); cpSync(join(stage.path, "graph-out"), graphDir, { recursive: true }); rebaseGraphMetadata(join(graphDir, "graph.json"), workspace);
+            const stage = reusableStages.get(item.task.fixture);
+            // Reuse an actual production build's artifacts (and its generated .gitignore) in the disposable workspace; only the recorded root is rebased.
+            if (existsSync(join(stage.path, "graph-out"))) { cpSync(join(stage.path, "graph-out"), join(workspace, "graph-out"), { recursive: true }); rebaseGraphMetadata(join(workspace, "graph-out", "graph.json"), workspace); }
+            if (existsSync(join(stage.path, ".gitignore"))) cpSync(join(stage.path, ".gitignore"), join(workspace, ".gitignore"));
+            graphBuild.status = stage.status; graphBuild.sideEffects = stage.sideEffects;
             graphBuild.buildWallMs = stage.buildWallMs; graphBuild.chargedBuildMs = stage.buildWallMs / stage.reuseCount;
           }
         }
         const blindId = makeBlindId();
-        // Home/session/temp dirs and graph artifacts live OUTSIDE the fixture workspace so ordinary search/list tools cannot see them.
+        // Home/session/temp dirs live outside the workspace; production graph-out/.gitignore sit inside the disposable workspace but are blocked from ordinary tools by the adapter.
         const isolationRoot = join(tempRoot, "isolation", sessionId);
         const isolated = { home: join(isolationRoot, "agent-home"), session: join(isolationRoot, "session-data"), temp: join(isolationRoot, "agent-temp") };
         for (const directory of Object.values(isolated)) mkdirSync(directory, { recursive: true });
-        const request = makeAdapterRequest({ runId, task: item.task, repetition: item.repetition, treatment, workspace, isolation: isolated, approval: approval ?? { provider: "HARNESS_SIMULATION", model: "NONE", settings: {} }, provisioning: item.graphProvisioning, graphBuild, timeoutSeconds: manifest.timeLimitSeconds, graphPath: join(graphDir, "graph.json") });
-        let answer, usage, provider, model, failure = null, measuredWallMs;
+        const request = makeAdapterRequest({ runId, task: item.task, repetition: item.repetition, treatment, workspace, isolation: isolated, approval: approval ?? { provider: "HARNESS_SIMULATION", model: "NONE", settings: {} }, provisioning: item.graphProvisioning, graphBuild, timeoutSeconds: manifest.timeLimitSeconds });
+        let answer, usage, provider, model, failure = null, measuredWallMs; const stopFailures = [];
         if (synthetic) {
           const began = performance.now();
           // Deliberately canned adapter: no model/provider/agent call is possible in this branch.
@@ -318,13 +326,18 @@ async function runCore({ manifestPath = DEFAULT_MANIFEST, outputDirectory, packa
           if (child.error) failure = String(child.error);
           else if (child.status !== 0) failure = `adapter exited ${child.status}: ${child.stderr?.slice(0, 4000) ?? ""}`;
           if (!failure) {
-            try { const output = JSON.parse(child.stdout); usage = validateAdapterMetrics(output, approval, treatment); answer = output.answer; provider = output.provider; model = output.model; }
+            try {
+              const output = JSON.parse(child.stdout); usage = validateAdapterMetrics(output, approval, treatment); answer = output.answer; provider = output.provider; model = output.model;
+              if (usage.contextBudgetAbort) stopFailures.push("adapter stopped: estimated context budget exceeded");
+              if (usage.toolLimitReached) stopFailures.push("adapter stopped: tool-call limit reached");
+              if (usage.outputLimitReached) stopFailures.push("adapter stopped: output-token limit reached");
+            }
             catch (error) { failure = `invalid adapter response: ${error instanceof Error ? error.message : String(error)}`; }
           }
-          if (failure) { answer = "ADAPTER FAILURE — no score should be inferred."; provider = approval.provider; model = approval.model; usage = { inputTokens: 0, outputTokens: 0, toolDeclarationTokens: null, toolPromptTokens: null, sessionWallMs: measuredWallMs, toolCalls: [], inspectedPaths: [], retrievedTargets: [], wrongTargetDetours: null, measurement: "adapter failure; usage unavailable" }; }
+          if (failure) { answer = "ADAPTER FAILURE — no score should be inferred."; provider = approval.provider; model = approval.model; usage = { inputTokens: null, outputTokens: null, toolDeclarationTokens: null, toolPromptTokens: null, sessionWallMs: measuredWallMs, toolCalls: [], inspectedPaths: [], retrievedTargets: [], wrongTargetDetours: null, measurement: "adapter failure; usage unavailable" }; }
         }
         const callCounts = classifyCalls(usage.toolCalls);
-        rows.push({ blindId, taskId: item.task.id, repetition: item.repetition, treatment, randomizedOrder: order, workspaceId: sha256(`${runId}/${item.task.id}/${item.repetition}/${treatment}`).slice(0, 12), graphProvisioning: item.graphProvisioning, provider, model, answer, failures: failure ? [failure] : [], metrics: { usage, toolCallCounts: callCounts, inspectedPaths: usage.inspectedPaths, retrievedTargets: usage.retrievedTargets, wrongTargetDetours: usage.wrongTargetDetours, measuredAdapterWallMs: measuredWallMs, graphBuildWallMs: graphBuild.buildWallMs, chargedGraphBuildMs: graphBuild.chargedBuildMs, effectiveWallMsIncludingGraphCharge: measuredWallMs + graphBuild.chargedBuildMs } });
+        rows.push({ blindId, taskId: item.task.id, repetition: item.repetition, treatment, randomizedOrder: order, workspaceId: sha256(`${runId}/${item.task.id}/${item.repetition}/${treatment}`).slice(0, 12), graphProvisioning: item.graphProvisioning, provider, model, answer, failures: [...(failure ? [failure] : []), ...stopFailures], metrics: { usage, toolCallCounts: callCounts, inspectedPaths: usage.inspectedPaths, retrievedTargets: usage.retrievedTargets, wrongTargetDetours: usage.wrongTargetDetours, measuredAdapterWallMs: measuredWallMs, graphBuildStatus: graphBuild.status, graphBuildSideEffects: graphBuild.sideEffects, graphToolRuns: usage.graphToolRuns ?? [], graphBuildWallMs: graphBuild.buildWallMs, chargedGraphBuildMs: graphBuild.chargedBuildMs, effectiveWallMsIncludingGraphCharge: measuredWallMs + graphBuild.chargedBuildMs } });
       }
     }
     const result = packageRunResult({ manifest, manifestHash, fixtureHash, approval: approval ?? { provider: "HARNESS_SIMULATION", model: "NONE", settings: {} }, runId, rows, synthetic });
@@ -333,7 +346,7 @@ async function runCore({ manifestPath = DEFAULT_MANIFEST, outputDirectory, packa
     writeJson(join(outputDirectory, "results.json"), result);
     writeJson(join(outputDirectory, "blind-score-sheet.json"), blind.scoreSheet);
     writeJson(join(outputDirectory, "scoring-key.sealed.json"), blind.scoringKey);
-    writeJson(join(outputDirectory, "run-provenance.json"), { schemaVersion: 1, runId, harnessSimulation: synthetic, empirical: !synthetic, decisionEligible: false, manifestSha256: manifestHash, fixtureDigest: fixtureHash, harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(), approval: synthetic ? null : { approvedBy: approval.approvedBy, approvedAt: approval.approvedAt, provider: approval.provider, model: approval.model, settings: approval.settings, repetitions: approval.repetitions, environment: approval.environment, rubricSha256: approval.rubricSha256, adapterId: approval.adapterId, adapterVersion: approval.adapterVersion, piSdkVersion: approval.piSdkVersion, sourceTreeSha256: approval.sourceTreeSha256, adapterEntry: approval.adapterEntry, adapterEntrySha256: approval.adapterEntrySha256 } });
+    writeJson(join(outputDirectory, "run-provenance.json"), { schemaVersion: 1, runId, harnessSimulation: synthetic, empirical: !synthetic, decisionEligible: false, manifestSha256: manifestHash, fixtureDigest: fixtureHash, harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(), approval: synthetic ? null : { approvedBy: approval.approvedBy, approvedAt: approval.approvedAt, provider: approval.provider, model: approval.model, settings: approval.settings, repetitions: approval.repetitions, environment: approval.environment, rubricSha256: approval.rubricSha256, adapterId: approval.adapterId, adapterVersion: approval.adapterVersion, piSdkVersion: approval.piSdkVersion, sourceTreeSha256: approval.sourceTreeSha256, piSdkIntegrity: approval.piSdkIntegrity, adapterEntry: approval.adapterEntry, adapterEntrySha256: approval.adapterEntrySha256 } });
     return result;
   } finally { rmSync(tempRoot, { recursive: true, force: true }); }
 }
@@ -355,8 +368,8 @@ export async function runApprovedEvaluation({ manifestPath = DEFAULT_MANIFEST, o
   return runCore({ manifestPath, outputDirectory, packageRoot, synthetic: false, adapterCommand, adapterArgs, approval });
 }
 export function approvalInputs(manifestPath = DEFAULT_MANIFEST, packageRoot = PACKAGE_ROOT) {
-  const bytes = readFileSync(manifestPath); const manifest = JSON.parse(bytes.toString("utf8")); validateManifest(manifest);
-  return { manifestSha256: sha256(bytes), fixtureDigest: fixtureDigest(manifest, packageRoot), harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(packageRoot), rubricSha256: sha256(JSON.stringify(manifest.tasks.map(task => ({ id: task.id, expectedTargets: task.expectedTargets, maxScore: task.maxScore, rubric: task.rubric })))), repetitions: manifest.repetitions, environment: environmentFingerprint(), provider: TARGET_PROVIDER, model: TARGET_MODEL, settings: APPROVED_SETTINGS, adapterId: "pi-mindplace-mp2-pi-sdk-luna", adapterVersion: "mp2-pi-sdk-luna-1.0.0", piSdkVersion: "1.2.0", seed: manifest.seed, taskCount: manifest.tasks.length, runCount: manifest.tasks.length * manifest.repetitions * 2 };
+  const bytes = readFileSync(manifestPath); const manifest = JSON.parse(bytes.toString("utf8")); validateManifest(manifest, { allowSmoke: true });
+  return { piSdkIntegrity: pinnedSdkProvenance(packageRoot).integrity, manifestSha256: sha256(bytes), fixtureDigest: fixtureDigest(manifest, packageRoot), harnessSha256: harnessSha256(), sourceTreeSha256: evaluationSourceDigest(packageRoot), rubricSha256: sha256(JSON.stringify(manifest.tasks.map(task => ({ id: task.id, expectedTargets: task.expectedTargets, maxScore: task.maxScore, rubric: task.rubric })))), repetitions: manifest.repetitions, liveSmoke: manifest.liveSmoke === true, environment: environmentFingerprint(), provider: TARGET_PROVIDER, model: TARGET_MODEL, settings: APPROVED_SETTINGS, adapterId: "pi-mindplace-mp2-pi-sdk-luna", adapterVersion: "mp2-pi-sdk-luna-1.0.0", piSdkVersion: "1.2.0", seed: manifest.seed, taskCount: manifest.tasks.length, runCount: manifest.tasks.length * manifest.repetitions * 2 };
 }
 
 function parseArgs(argv) {

@@ -38,14 +38,15 @@ Requirements: Node.js 26+, tree-sitter (auto-installed as dependency).
 
 The extension targets the Pi extension API with `@earendil-works/pi-coding-agent` 1.2.0 as its development type baseline. Pi supplies that SDK at runtime, so it is declared as a peer rather than bundled; local development installs the exact SDK and TypeScript compiler versions from the lockfile. The package uses the supported Pi declarations and normal TypeScript `NodeNext` module resolution—there are no ambient SDK stubs or relaxed strictness settings.
 
+Use the same fresh-install validation command locally and in CI:
+
 ```bash
-npm ci
-npm run typecheck
-npm run test:focused
-npm test
+node tests/validate-development.mjs
 ```
 
-`npm run typecheck` runs TypeScript 5.9.3 with the repository's strict `tsconfig.json`. To validate a fresh install of the current dirty checkout (including non-ignored untracked files), run `node tests/validate-development.mjs`. The validator makes an isolated snapshot, resolves and installs dependencies without lifecycle scripts, applies the guarded declaration-only compatibility correction described below, typechecks and runs both test suites there, and only then copies its generated lockfile back to this checkout. It cleans its temporary snapshot on exit.
+The validator snapshots the current checkout, including non-ignored untracked files, installs dependencies with lifecycle scripts disabled, applies the guarded declaration-only compatibility correction described below, runs strict type checking and both test suites, and copies its generated lockfile back only after success. It cleans its temporary snapshot on exit and does not install dependencies into the root checkout. CI runs this command on Node.js 26 on Linux and Windows and rejects unexpected lockfile changes.
+
+`npm run typecheck` runs TypeScript 5.9.3 with the repository's strict `tsconfig.json`; `npm run test:focused` and `npm test` run the test suites in an already prepared development environment. Plain `npm ci` followed by type checking is not the accepted fresh-validation path while the upstream declaration defect below remains.
 
 Pi SDK 1.2.0 resolves `@earendil-works/pi-ai` through a compatible 1.x range, but pi-ai 1.2.0 publishes 42 model `.d.ts` imports of JSON without the `with { type: "json" }` attribute already present in sibling JavaScript. The dev-only npm override pins pi-ai to exactly 1.2.0; the isolated validator checks its exact registry tarball SHA-512 (`sha512-U5/1zXqfV1on7/9sbez03tT4Ru49Lvfb4+zXSDK3DBKF5cRk6KxvAOTOY3HJ4jimlZth+rs7vbJqN6iBQAoNuQ==`), SDK/package versions, complete expected declaration inventory, and each declaration's exact first import before editing only those import lines in the isolated `node_modules`. Its regression checks prove repeat application is byte-idempotent and reject unexpected versions or declaration content. No runtime JavaScript, APIs, dependencies, compiler settings, or installed checkout files are changed by this correction. This temporary workaround should be removed when a supported Pi SDK/pi-ai release ships corrected declarations: remove the override and patch invocation/helper, update the lock through the validator, then confirm strict typecheck and tests against the upstream declarations. Do not convert it into an npm lifecycle hook; validation must remain reproducible with `npm ci --ignore-scripts`.
 

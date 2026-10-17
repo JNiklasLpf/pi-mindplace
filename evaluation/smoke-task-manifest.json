@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "mp2-live-smoke-v1",
+  "description": "LIVE SMOKE ONLY: one task, two treatment arms, one repetition. Decision-ineligible; not a quality or comparative evaluation.",
+  "liveSmoke": true,
+  "decisionEligible": false,
+  "seed": 271828,
+  "repetitions": 1,
+  "timeLimitSeconds": 600,
+  "tasks": [
+    {
+      "id": "smoke-source-navigation",
+      "fixture": "evaluation/fixtures/small-ts-shell",
+      "prompt": "Trace how an incoming request reaches the authorization check. Name the handler and authorization implementation, explain the call path, and cite source paths.",
+      "expectedTargets": ["src/server.ts:handleRequest", "src/auth.ts:authorize"],
+      "maxScore": 4,
+      "rubric": { "requiredClaims": ["handleRequest delegates to authorize", "authorization rejects missing credentials"], "wrongTargetPenalties": ["confuses authenticateToken with the HTTP handler"], "scoreScale": "0-4 smoke rubric; not sufficient for comparative inference" }
+    }
+  ]
+}

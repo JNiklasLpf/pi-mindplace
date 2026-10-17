@@ -8,23 +8,23 @@ on:
 
 jobs:
   test:
-    name: Test (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
+    name: Strict validation (Node 26, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        node-version: [24, 26]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js 26
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 26
           cache: "npm"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Fresh install, strict typecheck, and tests
+        run: node tests/validate-development.mjs
 
-      - name: Run tests
-        run: npm test
+      - name: Verify validation did not change the lockfile
+        run: git diff --exit-code -- package-lock.json

@@ -2,11 +2,11 @@
 
 ## Current position
 
-The core software work in `IMPLEMENTATION_PLAN_2.md`, MP2-01 through MP2-06, is implemented and independently reviewed. MP2-07 is incomplete. Its offline evaluation harness and Copilot/Luna adapter exist, but the adapter still differs from the production tools. No model-backed evaluation, real smoke trial, blinded scoring, or keep/restrict/retire decision has run.
+The core software work in `IMPLEMENTATION_PLAN_2.md`, MP2-01 through MP2-06, is implemented and independently reviewed. MP2-07 remains empirically incomplete. The evaluation adapter now invokes the actual production build/query/explain tools inside disposable fixture workspaces, with path restrictions and generated artifacts hidden from ordinary tools. Offline comparisons and approval guards pass. No model-backed evaluation, real smoke trial, blinded scoring, or keep/restrict/retire decision has run.
 
-Luna implemented the changes. Haiku reviewed them, fixed concrete defects, and ran validation. The parent coordinated the work rather than implementing or testing it.
+In the latest follow-up, the user explicitly chose **Stop at offline validation** after reviewing the bounded two-session proposal. Do not run a live smoke or create an approval artifact without a new execution decision. No commit or push was requested in this follow-up.
 
-Read this summary first. Earlier plans and review ledgers describe intermediate snapshots and sometimes retain superseded status text. The latest evaluation review's **Offline conformance closure** and **Remaining graph divergences** sections supersede its earlier validation table and parent-run checklist.
+Read [the current validation ledger](BRANCH_VALIDATION.md) first. It supersedes older adapter-divergence findings and test counts. Earlier plans and reviews describe historical snapshots; their execution or commit authorizations do not apply to new work.
 
 ## What changed and why
 
@@ -60,7 +60,7 @@ node tests/validate-development.mjs
 
 It snapshots the current tracked and non-ignored untracked files, installs dependencies with lifecycle scripts disabled, applies the guarded declaration correction inside that snapshot, runs strict type checking and both test suites, and transfers the generated lockfile only after success. It cleans the snapshot afterward. It does not install the SDK into the root checkout.
 
-Do not assume the README's plain `npm ci` followed by `npm run typecheck` reproduces this pass without the declaration correction. Earlier root build failures reflected missing local SDK resolution; the isolated validator supplied the accepted type-check evidence.
+The README and CI now use this validator as the authoritative fresh-validation path. The root dependencies have also been installed with lifecycle scripts disabled. Plain root `npm run typecheck` still encounters the known upstream JSON-import declaration defect; only the isolated validator applies the guarded correction. CI targets Node 26 on Linux and Windows and checks for lockfile drift. Hosted CI has not been run in this follow-up.
 
 ## Progress and evidence
 
@@ -74,12 +74,14 @@ Do not assume the README's plain `npm ci` followed by `npm run typecheck` reprod
 | MP2-06 ranking, explain, and final output-budget evidence | Accepted |
 | MP2-07 matched-agent evaluation | Offline preparation only; full evaluation remains blocked |
 
-Latest delegated post-edit evidence from Haiku's final continuation pass:
+Latest parent-run post-edit evidence:
 
-- Isolated fresh-install validator and strict full-workspace type check passed.
-- Full suite: **80/80 passed**.
-- Focused suite: **44/44 passed**.
-- Working and staged whitespace checks passed.
+- Isolated fresh-install validator and strict full-workspace type check passed on Node 26.8.1 / npm 11.19.0, Windows.
+- Full suite: **90/90 passed**.
+- Focused suite: **54/54 passed**.
+- Working diff whitespace check passed; package lock unchanged.
+- Independent re-audit found no blocker for the proposed two-session smoke.
+- A two-session canned simulation passed result-schema validation; no model was used.
 
 These counts include offline harness tests. Fake SDK sessions and canned smoke artifacts prove plumbing, not agent correctness, usefulness, latency, or savings. The current files have not been exercised in an authorized model-backed trial.
 
@@ -91,7 +93,7 @@ The harness has task/rubric manifests, fixture hashes, execution-approval checks
 
 The main remaining problems are:
 
-1. Production/adapter equivalence is incomplete. Query-core formatting is compared, but the adapter uses a different freshness gate and header, explain equivalence is untested, build writes an external evaluation artifact by design, and its query schema caps a budget that production does not cap. Do not interpret this as an evaluation of the exact production workflow yet.
+1. Tool-level production fidelity is covered by direct production invocation and comparison regressions, including schemas, query/explain output and freshness states. This is a constrained tool treatment, not a complete production extension/lifecycle replication. Live SDK behavior remains unverified.
 2. The C# fixture is synthetic and small/medium. Its directory name does not establish representative large-project coverage.
 3. Actual model usage and overhead are unmeasured. Tool-declaration/prompt splits remain unavailable, not zero. The context ceiling is estimated, not an exact provider-token cap.
 4. Local pinned SDK loading, credential availability, effective hooks, and provider control compliance need a separately authorized runtime preflight/smoke. Static catalog metadata and fake SDK tests do not prove account entitlement or live behavior.
@@ -107,17 +109,17 @@ The draft full run is nine tasks, three repetitions, and two treatments, totalin
 
 ## Resume in this order
 
-1. Read the latest review links below, especially the remaining graph divergences. Keep core software completion separate from empirical completion.
-2. Have Luna align the evaluation adapter with the production tool behavior, or explicitly redesign the treatment before calling it a production comparison. Have Haiku independently verify the result.
-3. Close representative-fixture and measurement gaps. Record unavailable metrics honestly rather than inventing them.
-4. Freeze a concrete limited-smoke proposal with manifest, rubric, source/adapter/dependency identities, exact model/settings, repetitions, environment, and isolation/credential boundaries.
-5. Obtain explicit user execution approval before any model-backed smoke or matched run. No approval artifact has been created.
-6. Run the approved smoke, then obtain approval for any larger run set. Score blind to treatment where practical, retain failures, and report paired uncertainty before deciding keep/restrict/retire.
+1. Read [the current validation ledger](BRANCH_VALIDATION.md) and keep software completion separate from empirical completion.
+2. Respect the user's decision to stop at offline validation. No live execution is currently authorized.
+3. If live evaluation is requested later, rerun validation, freeze a fresh source/manifest/environment proposal, and obtain explicit approval. The checked-in smoke manifest is one task, one repetition and two treatment sessions; the full manifest is not authorized by smoke approval.
+4. Close representative-fixture and measurement gaps before a larger matched run. Record unavailable metrics honestly.
+5. After an approved smoke, obtain separate approval for larger runs and blind scoring. Retain failures and report paired uncertainty before deciding keep/restrict/retire.
 
 Do not retune tasks or the rubric after seeing real outcomes. An unfavorable or inconclusive result is valid.
 
 ## References and repository state
 
+- [Current validation and offline-only decision](BRANCH_VALIDATION.md)
 - [Second implementation plan](../IMPLEMENTATION_PLAN_2.md)
 - [Core software review](IMPLEMENTATION_2_FINAL_REVIEW.md)
 - [Binding review](IMPLEMENTATION_2_BINDING_REVIEW.md)
@@ -130,4 +132,4 @@ The branch is `feat/csharp-support`, tracking `origin/feat/csharp-support` in th
 
 Before the newly requested commit, the raw index was byte-identical to the saved baseline. A local worktree/index backup exists at `C:/Users/jnikla/AppData/Local/Temp/pi-mindplace-mp2-baseline-20261016-092614`. That path and the globally approved subagent validators are machine-local conveniences, not prerequisites supplied by this commit.
 
-For continued delegation, use Luna for implementation and Haiku for independent review/refactoring. The parent remains responsible for planning and coordination. The user's latest instruction explicitly authorizes committing and pushing this handoff; older no-commit notes describe the implementation phase, not this delivery step.
+The earlier delivery used Luna implementation and Haiku review, with a commit/push authorization for that handoff only. The current follow-up includes parent-run validation, CI/documentation changes and delegated adapter work with independent review. Its final user decision is offline-only; no commit, push or live run was performed.
