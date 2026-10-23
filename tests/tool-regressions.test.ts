@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, statSync, utimesSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, statSync, utimesSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import extension from "../index.ts";
@@ -11,7 +11,6 @@ import { KnowledgeGraph } from "../src/graph.ts";
 import { detect } from "../src/detect.ts";
 import { makeGraphMetadata, getFreshnessCounters, resetFreshnessCounters } from "../src/graph-file.ts";
 import { estimateQueryTokens, query as productionQuery, formatQueryResult as productionFormat } from "../src/query.ts";
-import { extract } from "../src/extract.ts";
 import type { ExtractionResult } from "../src/types.ts";
 // @ts-expect-error The executable evaluation harness is standalone JavaScript outside the TS source include.
 const mp2Eval: any = await import("../scripts/mp2-eval.mjs");
@@ -28,10 +27,11 @@ function mp2Request(treatment: "map_only" | "graph_optional", base: string): any
   provider: "github-copilot", model: "gpt-6-luna", settings: { ...mp2Adapter.COMMON_LIMITS }, timeLimitSeconds: 600,
   context: { repositoryMap: "same map context" }, isolation: { home: join(base, "home"), session: join(base, "session"), temp: join(base, "temp") },
   tools: { ordinary: ["list_files", "search_text", "read_file", "read_diff"], graph: graphAvailable ? ["mindplace_query", "mindplace_explain", "mindplace_build"] : [], graphUseRequired: false },
-  graph: { available: graphAvailable, graphPath: graphAvailable ? join(base, "external-graphs", "graph.json") : null },
+  graph: { available: graphAvailable },
  };
 }
-function fakeAdapterDependencies({ estimate = 20, blockAfterTools = false }: { estimate?: number; blockAfterTools?: boolean } = {}): any {
+const stubTool = (name: string) => ({ name, parameters: { properties: {} }, execute: async () => ({ content: [{ type: "text", text: "" }] }) });
+function fakeAdapterDependencies({ estimate = 20, blockAfterTools = false, exhaustOutput = false, noUsage = false }: { estimate?: number; blockAfterTools?: boolean; exhaustOutput?: boolean; noUsage?: boolean } = {}): any {
  const state: any = { sessions: [], runtimes: [], authLookups: 0, prompts: 0, providerCalls: 0 };
  const Type = { Object: (x: unknown) => x, Optional: (x: unknown) => x, String: (x: unknown) => x, Number: (x: unknown) => x, Boolean: (x: unknown) => x };
  class DefaultResourceLoader { options: any; constructor(options: any) { this.options = options; } }
@@ -48,6 +48,7 @@ function fakeAdapterDependencies({ estimate = 20, blockAfterTools = false }: { e
     subscribe(listener: any) { sessionState.listener = listener; return () => { sessionState.listener = undefined; }; },
     async prompt(text: string, promptOptions: any) {
      state.prompts++; assert.equal(text, "Trace the call chain."); assert.equal(promptOptions.expandPromptTemplates, false);
+     if (exhaustOutput) sessionState.listener?.({ type: "message_end", message: { role: "assistant", usage: { input: 5, output: 2048 } } });
      if (agent.transformContext) await agent.transformContext([{ role: "user", content: [{ type: "text", text }] }]);
      if (sessionState.aborted) return;
      if (agent.prepareRequest) await agent.prepareRequest({ context: { messages: [] }, model: options.model });
@@ -60,18 +61,18 @@ function fakeAdapterDependencies({ estimate = 20, blockAfterTools = false }: { e
       }
      } else {
       if (agent.beforeToolCall) await agent.beforeToolCall({ toolCall: { name: "read_file" } });
-      sessionState.listener?.({ type: "message_end", message: { role: "assistant", usage: { input: 123, output: 87 } } });
+      if (!noUsage) sessionState.listener?.({ type: "message_end", message: { role: "assistant", usage: { input: 123, output: 87 } } });
       sessionState.listener?.({ type: "tool_execution_start", toolName: "read_file", args: { path: "src/a.ts" } });
-      sessionState.listener?.({ type: "tool_execution_end", toolName: "read_file", durationMs: 12.5 });
+      sessionState.listener?.({ type: "tool_execution_end", toolName: "read_file", ...(noUsage ? {} : { durationMs: 12.5 }) });
      }
     },
     getLastAssistantText: () => "The endpoint calls the service. Mind Place graph was optional.",
-    getSessionStats: () => ({ tokens: { input: 123, output: 87 } }),
+    getSessionStats: () => noUsage ? undefined : ({ tokens: { input: 123, output: 87 } }),
     dispose() { sessionState.disposed = true; },
    };
    state.sessions.push(sessionState); return { session };
   },
-  graphApi: { detect() {}, extract() {}, KnowledgeGraph: {}, makeGraphMetadata() {}, query() {}, formatQueryResult() {} },
+  graphApi: { MindplaceQueryTool: stubTool("mindplace_query"), MindplaceExplainTool: stubTool("mindplace_explain"), MindplaceBuildTool: stubTool("mindplace_build") },
  };
  return { deps, state };
 }
@@ -107,7 +108,7 @@ describe("offline Pi SDK 1.2.0 Luna adapter conformance", () => {
   assert.deepEqual(mapResult.usage.toolCalls, [{ name: "read_file", durationMs: 12.5 }]);
   assert.deepEqual(mapResult.usage.inspectedPaths, ["src/a.ts"]);
   assert.equal(mapResult.provider, "github-copilot"); assert.equal(mapResult.model, "gpt-6-luna");
-  assert.ok(graph.graph.graphPath.startsWith(base) && !graph.graph.graphPath.startsWith(graph.workspace));
+  assert.equal(graph.graph.graphPath, undefined, "no external graph artifact is assumed");
  });
 
  it("aborts an over-budget fake context before any provider request and stops after the tool-call cap", async () => {
@@ -120,22 +121,168 @@ describe("offline Pi SDK 1.2.0 Luna adapter conformance", () => {
   assert.equal(capped.usage.toolLimitReached, true); assert.equal(toolFake.state.sessions[0].aborted, 1);
   assert.equal(toolFake.state.runtimes[0].allowModelNetwork, false);
  });
+
+ it("throws from guard hooks so the (fake) provider callback is never reached; actual Pi agent loop is not launched here", async () => {
+  const base = root();
+  const ctxFake = fakeAdapterDependencies({ estimate: 16001 });
+  const ctxResult = await mp2Adapter.executeAdapterRequest(mp2Request("map_only", base), ctxFake.deps);
+  assert.equal(ctxFake.state.providerCalls, 0); assert.equal(ctxResult.usage.stopReason, "context_budget");
+  const outFake = fakeAdapterDependencies({ exhaustOutput: true });
+  const outResult = await mp2Adapter.executeAdapterRequest(mp2Request("map_only", base), outFake.deps);
+  assert.equal(outFake.state.providerCalls, 0); assert.equal(outResult.usage.outputLimitReached, true); assert.equal(outResult.usage.stopReason, "output_limit");
+  assert.equal(outFake.state.sessions[0].aborted, 1);
+  assert.equal(outResult.usage.outputTokens, 2048);
+  // Static note: Pi 1.2 agent-loop calls these hooks then the provider unconditionally, so the hooks throw; the real Agent loop is not launched here.
+ });
+
+ it("reports missing usage/durations as null (never fabricated zero) and truthful legitimate zero usage", async () => {
+  const base = root(); const fake = fakeAdapterDependencies({ noUsage: true });
+  const result = await mp2Adapter.executeAdapterRequest(mp2Request("map_only", base), fake.deps);
+  assert.equal(result.usage.inputTokens, null); assert.equal(result.usage.outputTokens, null);
+  assert.deepEqual(result.usage.toolCalls, [{ name: "read_file", durationMs: null }]);
+  assert.equal(result.usage.stopReason, null); assert.equal(result.usage.toolLimitReached, false); assert.equal(result.usage.outputLimitReached, false);
+  // legitimate zero: stats fallback reports finite zeros only when no event usage was seen
+  const zeroResult = await mp2Adapter.executeAdapterRequest(mp2Request("map_only", base), (() => { const f = fakeAdapterDependencies({ noUsage: true }); const c = f.deps.createAgentSession; f.deps.createAgentSession = async (o: any) => { const r = await c(o); r.session.getSessionStats = () => ({ tokens: { input: 0, output: 0 } }); return r; }; return f.deps; })());
+  assert.equal(zeroResult.usage.inputTokens, 0); assert.equal(zeroResult.usage.outputTokens, 0);
+ });
+});
+
+const FIXTURE_FILES: Record<string, string> = {
+  "src/a.ts": "export function alpha() { return beta(); }\nexport function beta() { return 1; }\n",
+  "src/b.ts": "export function beta() { return 2; }\n",
+};
+async function adapterGraphTools(): Promise<{ base: string; workspace: string; api: any; byName: (name: string) => any; ordinary: (name: string) => any; prod: (name: string) => any }> {
+  const base = root(); const workspace = join(base, "workspace");
+  for (const [file, text] of Object.entries(FIXTURE_FILES)) { mkdirSync(join(workspace, file, ".."), { recursive: true }); writeFileSync(join(workspace, file), text); }
+  const api = await mp2Adapter.loadGraphApi();
+  const { deps, state } = fakeAdapterDependencies(); deps.graphApi = api;
+  await mp2Adapter.executeAdapterRequest(mp2Request("graph_optional", base), deps);
+  const tools = state.sessions[0].options.customTools;
+  const byName = (name: string) => tools.find((tool: any) => tool.name === name);
+  const prod = (name: string) => ({ mindplace_build: api.MindplaceBuildTool, mindplace_query: api.MindplaceQueryTool, mindplace_explain: api.MindplaceExplainTool } as any)[name];
+  return { base, workspace, api, byName, ordinary: byName, prod };
+}
+const signal = () => new AbortController().signal;
+const adapterCall = (tool: any, workspace: string, params: any) => tool.execute("t", params, signal(), () => {}, { cwd: workspace, hasUI: false });
+const productionCall = (tool: any, workspace: string, params: any) => tool.execute("t", params, signal(), () => {}, { cwd: workspace, hasUI: false });
+
+describe("actual production graph tools in the adapter", () => {
+  it("exposes production schema/description and matches production output for query and explain (exact, ambiguous, no-match, filters)", async () => {
+    const t = await adapterGraphTools();
+    for (const name of ["mindplace_build", "mindplace_query", "mindplace_explain"]) {
+      assert.equal(t.byName(name).description, t.prod(name).description);
+      assert.equal(t.byName(name).parameters, t.prod(name).parameters);
+      assert.equal(t.byName(name).label, t.prod(name).label);
+    }
+    const built = await adapterCall(t.byName("mindplace_build"), t.workspace, { force: true });
+    assert.match(textOf(built), /Mind Place built/);
+    const cases: Array<[string, any]> = [
+      ["mindplace_query", { question: "what does alpha call" }],
+      ["mindplace_query", { question: "what does alpha call", budget: 2000, minScore: 0.3 }],
+      ["mindplace_explain", { name: "alpha" }],
+      ["mindplace_explain", { name: "beta" }],
+      ["mindplace_explain", { name: "beta", file: "src/b.ts" }],
+      ["mindplace_explain", { name: "beta", type: "function", file: "src/a.ts" }],
+      ["mindplace_explain", { name: "doesNotExistAnywhere" }],
+    ];
+    for (const [name, params] of cases) {
+      const actual = await adapterCall(t.byName(name), t.workspace, params); const expected = await productionCall(t.prod(name), t.workspace, params);
+      assert.deepEqual(actual, expected, `${name} ${JSON.stringify(params)}`);
+    }
+    assert.equal((await adapterCall(t.byName("mindplace_explain"), t.workspace, { name: "beta" })).details.status, "ambiguous");
+    assert.equal((await adapterCall(t.byName("mindplace_explain"), t.workspace, { name: "doesNotExistAnywhere" })).details.status, "no_match");
+  });
+
+  it("matches production for missing, stale, and corrupt graph states", async () => {
+    const t = await adapterGraphTools(); const params = { question: "alpha" };
+    const compare = async () => {
+      for (const name of ["mindplace_query", "mindplace_explain"]) {
+        const p = name === "mindplace_query" ? params : { name: "alpha" };
+        assert.deepEqual(await adapterCall(t.byName(name), t.workspace, p), await productionCall(t.prod(name), t.workspace, p));
+      }
+    };
+    assert.equal((await adapterCall(t.byName("mindplace_query"), t.workspace, params)).details.status, "not_built"); await compare();
+    await adapterCall(t.byName("mindplace_build"), t.workspace, { force: true });
+    writeFileSync(join(t.workspace, "src", "a.ts"), "export function changed() {}\n");
+    assert.equal((await adapterCall(t.byName("mindplace_query"), t.workspace, params)).details.status, "stale"); await compare();
+    writeFileSync(join(t.workspace, "graph-out", "graph.json"), "not json");
+    const corrupt = await adapterCall(t.byName("mindplace_query"), t.workspace, params);
+    assert.notEqual(corrupt.details.status, "matched"); await compare();
+  });
+
+  it("hides production build artifacts from every ordinary tool and confines graph tool paths", async () => {
+    const t = await adapterGraphTools(); const run = async (name: string, params: any) => adapterCall(t.ordinary(name), t.workspace, params);
+    await adapterCall(t.byName("mindplace_build"), t.workspace, { force: true });
+    assert.ok(statSync(join(t.workspace, "graph-out", "graph.json")).isFile());
+    const listing = textOf(await run("list_files", {})); const search = textOf(await run("search_text", { query: "alpha" })); const searchAll = textOf(await run("search_text", { query: "graph-out" }));
+    for (const text of [listing, search, searchAll]) assert.doesNotMatch(text, /graph-out|\.gitignore|graph\.json|GRAPH_REPORT/);
+    assert.match(listing, /src\/a\.ts/);
+    for (const [name, params] of [["read_file", { path: "graph-out/graph.json" }], ["read_diff", { path: "GRAPH-OUT/graph.json" }], ["read_file", { path: ".gitignore" }], ["list_files", { path: "graph-out" }], ["search_text", { query: "alpha", path: "graph-out" }], ["read_file", { path: "src/../graph-out/graph.json" }]] as Array<[string, any]>) {
+      await assert.rejects(() => run(name, params), /not available|escapes|relative/, `${name} ${JSON.stringify(params)}`);
+    }
+    for (const params of [{ path: ".." }, { path: "../elsewhere" }, { path: ".hidden" }, { path: "src/.secret" }, { path: "graph-out" }, { path: join(t.base, "abs") }]) {
+      await assert.rejects(() => adapterCall(t.byName("mindplace_query"), t.workspace, { question: "alpha", ...params }), /safe|relative|escapes|not available/);
+    }
+    for (const file of ["/etc/passwd", "..\\x", ".env", "a/.hidden/b.ts"]) {
+      await assert.rejects(() => adapterCall(t.byName("mindplace_explain"), t.workspace, { name: "alpha", file }), /file filter/);
+    }
+  });
+
+  it("provisions via the production build, records side effects/time, and returns legitimate statuses for empty fixtures", async () => {
+    const t = await adapterGraphTools();
+    const run = await mp2Adapter.provisionGraph(t.api, t.workspace);
+    assert.equal(run.name, "mindplace_build"); assert.ok(run.wallMs >= 0); assert.equal(run.sideEffects.createdGraphOut, true); assert.equal(run.sideEffects.graphJsonPresent, true); assert.equal(run.sideEffects.graphJsonChanged, true);
+    const empty = root(); mkdirSync(empty, { recursive: true });
+    const none = await mp2Adapter.provisionGraph(t.api, empty);
+    assert.equal(none.status, "no_supported_source"); assert.equal(none.sideEffects.graphJsonPresent, false); assert.equal(none.sideEffects.graphJsonChanged, false);
+    const query = await mp2Adapter.runProductionGraphTool(t.api.MindplaceQueryTool, t.workspace, { question: "alpha" });
+    assert.equal(query.run.sideEffects.graphJsonPresent, true); assert.equal(query.run.sideEffects.graphJsonChanged, false, "a read-only query is present but not changed");
+  });
+
+  it("blocks DOS short-name and trailing-dot/space variants and rejects junction/symlink escapes", async () => {
+    const t = await adapterGraphTools(); const run = async (name: string, params: any) => adapterCall(t.ordinary(name), t.workspace, params);
+    await adapterCall(t.byName("mindplace_build"), t.workspace, { force: true });
+    for (const path of ["GRAPH-~1/graph.json", "graph~1/graph.json", "graph-out./graph.json", "graph-out /graph.json", ".gitignore.", ".gitignore ", "GITIGN~1"]) await assert.rejects(() => run("read_file", { path }), /not available|escapes|relative/, path);
+    const outside = root(); writeFileSync(join(outside, "secret.txt"), "TOPSECRET alpha\n");
+    try { symlinkSync(outside, join(t.workspace, "link"), process.platform === "win32" ? "junction" : "dir"); }
+    catch (error: any) { if (["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) return; throw error; }
+    await assert.rejects(() => run("read_file", { path: "link/secret.txt" }), /Symlink|escapes|not available/);
+    await assert.rejects(() => run("list_files", { path: "link" }), /Symlink|escapes|not available/);
+    assert.doesNotMatch(textOf(await run("list_files", {})), /secret/);
+    assert.doesNotMatch(textOf(await run("search_text", { query: "TOPSECRET" })), /TOPSECRET/);
+  });
+
+  it("matches production for incomplete freshness metadata and for pre-cancelled signals", async () => {
+    const t = await adapterGraphTools();
+    await adapterCall(t.byName("mindplace_build"), t.workspace, { force: true });
+    const graphPath = join(t.workspace, "graph-out", "graph.json"); const raw = JSON.parse(readFileSync(graphPath, "utf8"));
+    raw.mindplace.scanComplete = false; writeFileSync(graphPath, JSON.stringify(raw));
+    for (const [name, p] of [["mindplace_query", { question: "alpha" }], ["mindplace_explain", { name: "alpha" }]] as Array<[string, any]>) {
+      const actual = await adapterCall(t.byName(name), t.workspace, p);
+      assert.equal(actual.details.status, "unknown"); assert.deepEqual(actual, await productionCall(t.prod(name), t.workspace, p));
+    }
+    const aborted = new AbortController(); aborted.abort();
+    for (const [name, p] of [["mindplace_query", { question: "alpha" }], ["mindplace_explain", { name: "alpha" }], ["mindplace_build", { force: true }]] as Array<[string, any]>) {
+      const call = (tool: any) => tool.execute("c", p, aborted.signal, () => {}, { cwd: t.workspace, hasUI: false });
+      const actual = await call(t.byName(name)); const expected = await call(t.prod(name));
+      assert.equal(actual.details?.status, expected.details?.status, name); assert.deepEqual(actual.content, expected.content, name);
+    }
+  });
 });
 
 describe("production-vs-adapter graph query equivalence", () => {
- it("matches production query output for the same verified external artifact and production default budget", async () => {
+ it("matches production query output for the same verified workspace graph and production default budget", async () => {
   const base = root(); const workspace = join(base, "workspace"); mkdirSync(join(workspace, "src"), { recursive: true });
   writeFileSync(join(workspace, "src", "a.ts"), "export function alpha() { return beta(); }\nexport function beta() { return 1; }\n");
   const req = mp2Request("graph_optional", base);
-  const realApi = { detect, extract, KnowledgeGraph, makeGraphMetadata, query: productionQuery, formatQueryResult: productionFormat };
-  const { deps, state } = fakeAdapterDependencies(); deps.graphApi = realApi;
+  const { deps, state } = fakeAdapterDependencies(); deps.graphApi = await mp2Adapter.loadGraphApi();
   await mp2Adapter.executeAdapterRequest(req, deps);
   const tools = state.sessions[0].options.customTools; const byName = (name: string) => tools.find((tool: any) => tool.name === name);
   const toolContext = { cwd: workspace };
   await byName("mindplace_build").execute("build", {}, undefined, undefined, toolContext);
-  const raw = JSON.parse(readFileSync(req.graph.graphPath, "utf8"));
+  const raw = JSON.parse(readFileSync(join(workspace, "graph-out", "graph.json"), "utf8"));
   const question = "what does alpha call";
-  const info = "verified external evaluation graph";
+  const info = `status verified_current; graph ${join(workspace, "graph-out", "graph.json")} (root ${workspace})`;
   const explicit = textOf(await byName("mindplace_query").execute("query", { question, budget: 2000 }, undefined, undefined, toolContext));
   assert.equal(explicit, productionFormat(productionQuery(KnowledgeGraph.fromJSON(raw), question, 2000, "bfs", 0.15, info)));
   const defaulted = textOf(await byName("mindplace_query").execute("query-default", { question }, undefined, undefined, toolContext));
@@ -170,6 +317,35 @@ describe("tool root and explanation regressions", () => {
   assert.throws(() => mp2Eval.analyzeScoredResults(raw, blind, key), /never eligible/);
  });
 
+ it("accepts only the explicitly designated one-task LIVE SMOKE manifest and keeps full evaluation repetition guard", () => {
+  const smokePath = "evaluation/smoke-task-manifest.json";
+  const smoke = JSON.parse(readFileSync(smokePath, "utf8"));
+  const inputs = mp2Eval.approvalInputs(smokePath);
+  assert.equal(smoke.liveSmoke, true);
+  assert.equal(smoke.decisionEligible, false);
+  assert.equal(smoke.tasks.length * smoke.repetitions * 2, 2, "LIVE SMOKE is bounded to two arm sessions");
+  assert.equal(inputs.repetitions, 1);
+  assert.ok(mp2Eval.approvalInputs(mp2Eval.DEFAULT_MANIFEST).repetitions >= 2);
+  const invalidFullPath = join(root(), "one-repetition-full.json");
+  const invalidFull = { ...JSON.parse(readFileSync(mp2Eval.DEFAULT_MANIFEST, "utf8")), repetitions: 1 };
+  writeFileSync(invalidFullPath, JSON.stringify(invalidFull));
+  assert.throws(() => mp2Eval.approvalInputs(invalidFullPath), /at least two/);
+  assert.throws(() => mp2Eval.verifyApproval({ manifestBytes: Buffer.from(JSON.stringify({ ...smoke, decisionEligible: true })), manifest: { ...smoke, decisionEligible: true }, approval: {}, adapterCommand: "node", adapterArgs: [] }), /liveSmoke manifests must be exactly/);
+  for (const [label, mutate] of [["two reps", { repetitions: 2 }], ["two tasks", { tasks: [smoke.tasks[0], { ...smoke.tasks[0], id: "second" }] }]] as Array<[string, any]>) {
+   const bad = { ...smoke, ...mutate }; const badPath = join(root(), `${label.replace(" ", "-")}.json`); writeFileSync(badPath, JSON.stringify(bad));
+   assert.throws(() => mp2Eval.approvalInputs(badPath), /liveSmoke manifests must be exactly/, label);
+  }
+ });
+
+ it("analysis refuses failed attempts and null metrics instead of coercing zero", () => {
+  const usage = { inputTokens: 1, outputTokens: 1, sessionWallMs: 1 };
+  const row = (failures: string[], inputTokens: number | null) => ({ blindId: "b1", taskId: "t", repetition: 1, treatment: "map_only", failures, metrics: { usage: { ...usage, inputTokens }, toolCallCounts: { ordinary: 0, graph: 0 }, effectiveWallMsIncludingGraphCharge: 1 } });
+  const sheet = { runId: "r", harnessSimulation: false, scoringStatus: "BLIND_SCORING_COMPLETE", entries: [{ blindId: "b1", score: 1, maxScore: 5, scorerId: "s" }] };
+  const key = { runId: "r", mapping: { b1: { maxScore: 5 } } };
+  const results = (r: any) => ({ schemaVersion: 1, empirical: true, harnessSimulation: false, runId: "r", repetitions: 1, seed: 1, results: [r] });
+  assert.throws(() => mp2Eval.analyzeScoredResults(results(row(["adapter stopped: tool-call limit reached"], 1)), sheet, key), /refuses failed attempt/);
+  assert.throws(() => mp2Eval.analyzeScoredResults(results(row([], null)), sheet, key), /refuses null/);
+ });
  it("refuses unapproved or hash-mismatched model execution before any adapter can launch", async () => {
   const manifestBytes = readFileSync(mp2Eval.DEFAULT_MANIFEST);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -177,8 +353,8 @@ describe("tool root and explanation regressions", () => {
   const approval = {
    schemaVersion: 1, approved: true, approvedBy: "test-only", approvedAt: "2026-10-16T12:00:00Z",
    manifestSha256: inputs.manifestSha256, fixtureDigest: inputs.fixtureDigest, harnessSha256: inputs.harnessSha256, rubricSha256: inputs.rubricSha256,
-   provider: inputs.provider, model: inputs.model, settings: inputs.settings, repetitions: inputs.repetitions, adapterVersion: inputs.adapterVersion, piSdkVersion: "1.2.0",
-   sourceTreeSha256: inputs.sourceTreeSha256, environment: inputs.environment, adapterId: inputs.adapterId, adapterCommand: "not-a-real-command", adapterArgs: [],
+   provider: inputs.provider, model: inputs.model, settings: inputs.settings, repetitions: inputs.repetitions, liveSmoke: inputs.liveSmoke, adapterVersion: inputs.adapterVersion, piSdkVersion: "1.2.0",
+   sourceTreeSha256: inputs.sourceTreeSha256, piSdkIntegrity: inputs.piSdkIntegrity, environment: inputs.environment, adapterId: inputs.adapterId, adapterCommand: "not-a-real-command", adapterArgs: [],
   };
   assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval: undefined, adapterCommand: "not-a-real-command", adapterArgs: [] }), /No adapter launch is authorized/);
   assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval: { ...approval, manifestSha256: "0".repeat(64) }, adapterCommand: approval.adapterCommand, adapterArgs: [] }), /manifest hash mismatch/);
@@ -188,6 +364,9 @@ describe("tool root and explanation regressions", () => {
   const pinned = { ...approval, adapterCommand: "node", adapterArgs: [entry], adapterEntry: entry, adapterEntrySha256: mp2Eval.sha256(readFileSync(entry)) };
   assert.equal(mp2Eval.verifyApproval({ manifestBytes, manifest, approval: pinned, adapterCommand: "node", adapterArgs: [entry] }).fixtureDigest, inputs.fixtureDigest);
   assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval, adapterCommand: approval.adapterCommand, adapterArgs: [] }), /Approval must pin the adapter entry/);
+  const relativePinned = { ...pinned, adapterArgs: [relative(process.cwd(), entry)], adapterEntry: relative(process.cwd(), entry) };
+  assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval: relativePinned, adapterCommand: "node", adapterArgs: relativePinned.adapterArgs }), /absolute path/);
+  assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval: { ...pinned, piSdkIntegrity: "sha512-AAAA" }, adapterCommand: "node", adapterArgs: [entry] }), /lock integrity/);
   writeFileSync(entry, "// tampered after approval\n");
   assert.throws(() => mp2Eval.verifyApproval({ manifestBytes, manifest, approval: pinned, adapterCommand: "node", adapterArgs: [entry] }), /Adapter entry file hash mismatch/);
  });
